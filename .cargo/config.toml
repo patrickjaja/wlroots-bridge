@@ -1,0 +1,10 @@
+# Use rust-lld (shipped with the toolchain) as the linker for the musl
+# targets. This lets us produce fully-static binaries with no external C
+# cross-linker (no musl-gcc, no gcc-aarch64-linux-gnu) - wlroots-bridge is pure
+# Rust with zero C dependencies (wayland-client's RustBackend, no libwayland),
+# so nothing needs a system linker.
+[target.x86_64-unknown-linux-musl]
+rustflags = ["-C", "linker=rust-lld", "-C", "target-feature=+crt-static"]
+
+[target.aarch64-unknown-linux-musl]
+rustflags = ["-C", "linker=rust-lld", "-C", "target-feature=+crt-static"]

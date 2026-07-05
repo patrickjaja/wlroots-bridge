@@ -1,0 +1,119 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - 'feature/**'
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    name: fmt + clippy
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+  build:
+    name: build + test (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          # rust-lld (used as the musl linker via .cargo/config.toml) ships
+          # with the toolchain, so no external cross-linker is needed.
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: cargo build (release)
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: cargo test
+        run: cargo test --locked --target ${{ matrix.target }}
+
+      - name: Assert fully static binary
+        run: |
+          BIN="target/${{ matrix.target }}/release/wlroots-bridge"
+          echo ">>> file $BIN"
+          file "$BIN"
+          # Newer file(1) reports "static-pie linked" for a fully-static PIE;
+          # older versions say "statically linked". Accept either.
+          if ! file "$BIN" | grep -qE "statically linked|static-pie linked"; then
+            echo "FAIL: $BIN is not statically linked" >&2
+            exit 1
+          fi
+          # ldd on a fully-static binary prints "not a dynamic executable" or
+          # "statically linked" (and exits non-zero), so tolerate its failure.
+          echo ">>> ldd $BIN"
+          LDD_OUT="$(ldd "$BIN" 2>&1 || true)"
+          echo "$LDD_OUT"
+          if ! echo "$LDD_OUT" | grep -qi "not a dynamic executable\|statically linked"; then
+            echo "FAIL: ldd reports $BIN is dynamically linked" >&2
+            exit 1
+          fi
+          echo "OK: $BIN is fully static"
+
+  headless-sway-smoke:
+    name: headless sway smoke test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: smoke-x86_64-unknown-linux-musl
+
+      - name: Install sway (headless wlroots compositor)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends sway
+
+      - name: cargo build (release)
+        run: cargo build --release --locked --target x86_64-unknown-linux-musl
+
+      - name: Run headless-sway smoke test
+        env:
+          WLROOTS_BRIDGE_BIN: target/x86_64-unknown-linux-musl/release/wlroots-bridge
+        run: |
+          chmod +x scripts/test-headless-sway.sh
+          scripts/test-headless-sway.sh

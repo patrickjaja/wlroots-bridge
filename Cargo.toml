@@ -1,0 +1,26 @@
+[package]
+name = "wlroots-bridge"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+authors = ["Patrick Jaja"]
+description = "wlroots-Wayland support bridge for Linux computer-use tooling (Claude Desktop)."
+
+[dependencies]
+anyhow = "1.0.102"
+base64 = "0.22.1"
+clap = { version = "4.6.1", features = ["derive", "std", "help", "suggestions"], default-features = false }
+image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
+serde = { version = "1.0.228", features = ["derive"], default-features = false }
+serde_json = { version = "1.0.149", default-features = false, features = ["std"] }
+xkeysym = "0.2.1"
+wayland-client = "0.31.14"
+wayland-protocols = { version = "0.32.12", features = ["client", "staging", "unstable"] }
+wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
+wayland-protocols-misc = { version = "0.3.12", features = ["client"] }
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 8
+opt-level = 3
