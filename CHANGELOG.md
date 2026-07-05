@@ -38,9 +38,11 @@ speaking the same one-shot CLI + JSON contract.
   symbol names (`U597D`, `U1F600`) for CJK/emoji. The CU key-spec grammar parser
   and key-name tables are ported verbatim from `x11-bridge`.
 - **Window queries** (`windows`, `frontmost-app`, `activate-window`) via
-  `zwlr_foreign_toplevel_management_unstable_v1`, falling back to
-  `ext_foreign_toplevel_list_v1` (Niri; list only, no activate). Window info
-  mirrors `x11-bridge`'s snake_case `WindowInfo`.
+  `zwlr_foreign_toplevel_management_unstable_v1` - advertised by all three target
+  compositors (Sway, Hyprland, and Niri; verified against niri's source), so
+  `activate-window` works on all of them. `ext_foreign_toplevel_list_v1` is a
+  list-only fallback for compositors that advertise only the ext protocol.
+  Window info mirrors `x11-bridge`'s snake_case `WindowInfo`.
 - **doctor** reports `WAYLAND_DISPLAY`, the detected compositor, and the bound
   version of every global the bridge depends on - the diagnostics backbone.
 - **session-start / session-end** no-ops (`{"ok":true}`) for JS session parity.

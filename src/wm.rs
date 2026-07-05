@@ -1,10 +1,15 @@
 //! Window queries + activation over the foreign-toplevel protocols.
 //!
-//! Prefers `zwlr_foreign_toplevel_management_unstable_v1` (Sway + Hyprland):
-//! it lists toplevels with `app_id` / `title` / `state` / `output` and supports
-//! `activate`. Falls back to `ext_foreign_toplevel_list_v1` (staging; Niri) for
-//! listing only - that protocol has no activate and no state, so `activate-window`
-//! is unavailable and windows report neutral state.
+//! Prefers `zwlr_foreign_toplevel_management_unstable_v1`: it lists toplevels
+//! with `app_id` / `title` / `state` and supports `activate`. All three target
+//! compositors advertise it - Sway, Hyprland, AND Niri (niri's
+//! `src/protocols/foreign_toplevel.rs` implements the wlr manager with an
+//! `activate` handler alongside the ext list), so `activate-window` works on all
+//! three. Falls back to `ext_foreign_toplevel_list_v1` (staging) for listing
+//! only on any compositor that advertises the ext protocol but not the wlr
+//! manager - that protocol has no activate and no state, so `activate-window`
+//! errors and windows report neutral state. None of Sway/Hyprland/Niri actually
+//! take this fallback path.
 //!
 //! ## Contract deviations (documented in DESIGN.md)
 //!

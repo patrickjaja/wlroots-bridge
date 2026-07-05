@@ -176,12 +176,19 @@ releasing when nothing is held is not an error.
 
 ## Windows
 
-`zwlr_foreign_toplevel_management_unstable_v1` (Sway + Hyprland) lists toplevels
-with `app_id` / `title` / `state` / and supports `activate`. `activate-window`
-uses its `activate` request with a `wl_seat`. Falls back to
-`ext_foreign_toplevel_list_v1` (staging; Niri) for **listing only** - that
-protocol has no `activate` (so `activate-window` errors) and no state (windows
-report neutral state).
+`zwlr_foreign_toplevel_management_unstable_v1` lists toplevels with `app_id` /
+`title` / `state` and supports `activate`; `activate-window` uses its `activate`
+request with a `wl_seat`. **All three target compositors advertise it** - Sway,
+Hyprland, and Niri (verified against niri's source: `src/protocols/foreign_toplevel.rs`
+implements the `zwlr_foreign_toplevel_manager_v1` global with an `activate`
+handler, in addition to `ext_foreign_toplevel_list_v1`). So on Sway/Hyprland/Niri
+this bridge takes the wlr path and `activate-window` works everywhere.
+
+The `ext_foreign_toplevel_list_v1` (staging) path is kept as a **fallback for
+list-only compositors** that advertise the ext protocol but not the wlr manager.
+That protocol has no `activate` (so `activate-window` errors on such a
+compositor) and no state (windows report neutral state). It is not the path any
+of the three primary compositors actually take, but it broadens coverage.
 
 **Contract deviations (wlroots-specific):**
 
@@ -197,6 +204,13 @@ report neutral state).
 - `id` is the foreign-toplevel handle's protocol object id as a decimal string
   (or, for the ext protocol, its stable `identifier` when provided).
 - `frontmost-app` picks the `activated` toplevel, else the first.
+
+**Niri note:** niri gates `wlr-screencopy`, `virtual-pointer`, `virtual-keyboard`,
+and the foreign-toplevel protocols as **privileged** - it disables them for
+clients that connect through a Wayland security-context (sandboxed clients). The
+bridge runs as an ordinary client (launched by Claude Desktop, not inside a
+sandbox), so it gets full access; a future sandboxed deployment would see these
+globals disappear from the registry, which `doctor` would surface.
 
 ## cursor-position
 

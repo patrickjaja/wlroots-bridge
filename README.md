@@ -39,12 +39,17 @@ The compositor must advertise the wlroots protocol extensions this bridge binds:
 - `zwlr_virtual_pointer_manager_v1` (pointer input)
 - `zwp_virtual_keyboard_manager_v1` (keyboard input)
 - `zwlr_screencopy_manager_v1` (screenshots)
-- `zwlr_foreign_toplevel_management_unstable_v1` (window list + activate) **or**
-  `ext_foreign_toplevel_list_v1` (window list only; Niri)
+- `zwlr_foreign_toplevel_management_unstable_v1` (window list + activate),
+  with `ext_foreign_toplevel_list_v1` as a list-only fallback for compositors
+  that advertise only the ext protocol
 - `zxdg_output_manager_v1` (logical output geometry)
 
-Sway, Hyprland, and Niri all ship these. Run `wlroots-bridge doctor` to see what
-the running compositor advertises (see [CLI overview](#cli-overview)).
+Sway, Hyprland, and **Niri all advertise the wlr protocols above** (including
+the wlr foreign-toplevel manager with `activate` - verified against niri's
+source), so window activation works on all three. Niri additionally gates these
+as privileged protocols, disabled only for sandboxed / security-context clients.
+Run `wlroots-bridge doctor` to see what the running compositor advertises (see
+[CLI overview](#cli-overview)).
 
 ## Portability (static musl, incl. NixOS)
 
@@ -118,7 +123,7 @@ failure it prints a message to stderr and exits 1 (clap parse errors exit 2).
 | `frontmost-app` | Report the activated app |
 | `app-under-point --x --y` | Unsupported on Wayland (returns null) |
 | `cursor-position` | Unsupported on Wayland (exits 1) |
-| `activate-window --window <id>` | Raise + focus a window (wlr protocol only) |
+| `activate-window --window <id>` | Raise + focus a window (wlr foreign-toplevel; works on Sway/Hyprland/Niri) |
 | `session-start` / `session-end` | No-ops (report `{"ok":true}`) |
 
 ```sh
