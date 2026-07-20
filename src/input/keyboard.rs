@@ -70,6 +70,17 @@ impl Keyboard {
         let state = if pressed { KEY_PRESSED } else { KEY_RELEASED };
         self.kb.key(now_ms(), evdev_code, state);
     }
+
+    /// Announce the depressed real-modifier bitmask to the compositor.
+    ///
+    /// Required for Smithay-based compositors (e.g. niri): unlike wlroots they
+    /// do not derive modifier state from injected modifier *keycodes*, only from
+    /// this explicit `modifiers` request. Without it, Ctrl/Shift/Alt/Super
+    /// chords and modified clicks arrive with no modifier active. `depressed`
+    /// uses XKB real-mod bits (see [`keymap::modifier_mask`]).
+    fn modifiers(&self, depressed: u32) {
+        self.kb.modifiers(depressed, 0, 0, 0);
+    }
 }
 
 fn now_ms() -> u32 {
@@ -124,8 +135,10 @@ pub fn key_sequence(conn: &Conn, keys: &str, repeat: Option<u32>) -> Result<Keyb
 
     // Resolve modifier evdev codes against the generated keymap.
     let mut modifier_codes = Vec::with_capacity(spec.modifiers.len());
+    let mut modifier_mask = 0u32;
     for name in &spec.modifiers {
         modifier_codes.push(keymap::modifier_evdev_code(&kb.keymap, name)?);
+        modifier_mask |= keymap::modifier_mask(name)?;
     }
     let base = kb.keymap.placements[0];
 
@@ -137,11 +150,15 @@ pub fn key_sequence(conn: &Conn, keys: &str, repeat: Option<u32>) -> Result<Keyb
         for &code in &modifier_codes {
             kb.key(code, true);
         }
+        let mut mask = modifier_mask;
         if base.needs_shift {
             kb.key(kb.keymap.shift_code, true);
+            mask |= 0x0000_0001;
         }
+        kb.modifiers(mask);
         kb.key(base.evdev_code, true);
         kb.key(base.evdev_code, false);
+        kb.modifiers(0);
         if base.needs_shift {
             kb.key(kb.keymap.shift_code, false);
         }
@@ -298,6 +315,10 @@ pub fn hold_key(conn: &Conn, keys: &[String], duration_ms: u64) -> Result<Keyboa
         .iter()
         .map(|m| keymap::modifier_evdev_code(&kb.keymap, m))
         .collect::<Result<_>>()?;
+    let mut mod_mask = 0u32;
+    for m in &mods {
+        mod_mask |= keymap::modifier_mask(m)?;
+    }
 
     // Press: modifiers, then each base key (with its shift level if needed).
     for &code in &mod_codes {
@@ -306,7 +327,9 @@ pub fn hold_key(conn: &Conn, keys: &[String], duration_ms: u64) -> Result<Keyboa
     let any_shift = kb.keymap.placements.iter().any(|p| p.needs_shift);
     if any_shift {
         kb.key(kb.keymap.shift_code, true);
+        mod_mask |= 0x0000_0001;
     }
+    kb.modifiers(mod_mask);
     for p in &kb.keymap.placements {
         kb.key(p.evdev_code, true);
     }
@@ -318,6 +341,7 @@ pub fn hold_key(conn: &Conn, keys: &[String], duration_ms: u64) -> Result<Keyboa
     for p in kb.keymap.placements.iter().rev() {
         kb.key(p.evdev_code, false);
     }
+    kb.modifiers(0);
     if any_shift {
         kb.key(kb.keymap.shift_code, false);
     }
@@ -352,12 +376,15 @@ impl ModifierHold {
         // A keymap with no base keys still binds the four modifier keys.
         let kb = Keyboard::create(conn, &qh, &[])?;
         let mut codes = Vec::with_capacity(modifiers.len());
+        let mut mask = 0u32;
         for name in modifiers {
             codes.push(keymap::modifier_evdev_code(&kb.keymap, name)?);
+            mask |= keymap::modifier_mask(name)?;
         }
         for &code in &codes {
             kb.key(code, true);
         }
+        kb.modifiers(mask);
         queue
             .roundtrip(&mut KeyboardState)
             .context("modifier press roundtrip")?;
@@ -367,6 +394,7 @@ impl ModifierHold {
 
 impl Drop for ModifierHold {
     fn drop(&mut self) {
+        self.kb.modifiers(0);
         for &code in self.codes.iter().rev() {
             self.kb.key(code, false);
         }

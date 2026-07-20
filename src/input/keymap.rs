@@ -411,6 +411,26 @@ pub fn modifier_evdev_code(keymap: &GeneratedKeymap, token: &str) -> Result<u32>
     }
 }
 
+/// The XKB real-modifier mask bit for a modifier token, matching the
+/// `modifier_map` emitted by [`generate_keymap`] (Control=0x4, Shift=0x1,
+/// Mod1/Alt=0x8, Mod4/Super=0x40).
+///
+/// The virtual keyboard must announce this via
+/// `zwp_virtual_keyboard_v1.modifiers`: Smithay-based compositors (e.g. niri)
+/// do not derive modifier state from injected modifier *keycodes*, only from the
+/// explicit `modifiers` request. wlroots derives it from the `modifier_map`,
+/// which is why key-only chording worked on Sway/Hyprland but dropped the
+/// modifier on niri.
+pub fn modifier_mask(token: &str) -> Result<u32> {
+    match modifier_keysym_name(token) {
+        Some("Control_L") => Ok(0x0000_0004),
+        Some("Shift_L") => Ok(0x0000_0001),
+        Some("Alt_L") => Ok(0x0000_0008),
+        Some("Super_L") => Ok(0x0000_0040),
+        _ => bail!("`{token}` is not a modifier"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
