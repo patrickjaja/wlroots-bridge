@@ -8,7 +8,7 @@ pure-Rust, statically-linkable binary. It is the direct sibling of `x11-bridge`
 (X11 / XWayland) and `kwin-portal-bridge` (KDE/Wayland) and speaks the **same
 JSON contract**, so the JS executor treats them interchangeably.
 
-- **Invoked by:** `js/cu_linux_executor.js` in `claude-desktop-bin`, via
+- **Invoked by:** `js/cu_linux_executor.js` in `claude-desktop-extra`, via
   `execFileSync(bin, [subcommand, ...args])`, reading `JSON.parse(stdout.trim())`.
   The binary resolves from `$WLROOTS_BRIDGE_BIN` / `resourcesPath` / `$PATH`
   (wiring the resolver into the JS side is a separate workstream).

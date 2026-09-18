@@ -9,7 +9,7 @@ single pure-Rust, statically-linked binary that replaces the shell-out chain
 [`kwin-portal-bridge`](https://github.com/patrickjaja/kwin-portal-bridge)
 (KDE/Wayland) and speaks the **same kebab-case one-shot CLI + JSON contract**,
 so the Claude Desktop JS executor (`js/cu_linux_executor.js` in
-`claude-desktop-bin`) treats them interchangeably and picks a backend per
+`claude-desktop-extra`) treats them interchangeably and picks a backend per
 session without changing how it parses output.
 
 **Status: experimental, v0.1.** All subcommands are implemented: output
@@ -17,8 +17,9 @@ enumeration (`wl_output` + `xdg-output`), `wlr-screencopy` capture (JPEG),
 virtual-pointer / virtual-keyboard input synthesis, and foreign-toplevel window
 queries + activation. Unit tests cover the pure logic (key-spec parsing, XKB
 keymap generation, pixel decoding, JSON shapes); the live protocol paths are
-exercised by a headless-sway smoke test in CI. Wiring the resolver into
-`claude-desktop-bin`'s `js/cu_linux_executor.js` is a separate workstream.
+exercised by a headless-sway smoke test in CI. The resolver is wired into
+`claude-desktop-extra`'s `js/cu_linux_executor.js`, which bundles this binary and
+drives it on Sway, Hyprland and Niri sessions.
 
 ## Sibling bridges
 
@@ -140,10 +141,10 @@ See [DESIGN.md](DESIGN.md) for the full subcommand -> JSON output contract, the
 key-spec grammar, the coordinate system, the held-button mechanism, the keymap
 generation approach, and the wlroots-specific contract deviations.
 
-## Bundling into claude-desktop-bin
+## Bundling into claude-desktop-extra
 
 `wlroots-bridge` is intended to be consumed by
-[`claude-desktop-bin`](https://github.com/patrickjaja/claude-desktop-bin) the
+[`claude-desktop-extra`](https://github.com/patrickjaja/claude-desktop-extra) the
 same way the other bridges are: the pre-built static binary is shipped inside the
 package and the JS executor resolves it at runtime, in order:
 
@@ -152,9 +153,9 @@ package and the JS executor resolves it at runtime, in order:
 3. `wlroots-bridge` on `$PATH` (a system install).
 
 Because the binary is fully static, the bundled copy runs on every supported
-distro without extra runtime dependencies. Wiring the resolver into
-`js/cu_linux_executor.js` is a follow-up on the `claude-desktop-bin` side and is
-out of scope for this repo.
+distro without extra runtime dependencies. The resolver lives in
+`claude-desktop-extra`'s `js/cu_mode_preamble.js`, which publishes the resolved
+path for `js/cu_linux_executor.js` to call.
 
 ## License
 

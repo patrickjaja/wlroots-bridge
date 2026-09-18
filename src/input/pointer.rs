@@ -319,7 +319,7 @@ pub fn drag(
 }
 
 /// Path of the holder pidfile in `$XDG_RUNTIME_DIR` (profile-suffixed so
-/// per-profile Desktop instances don't collide - see claude-desktop-bin's
+/// per-profile Desktop instances don't collide - see claude-desktop-extra's
 /// profile system). Falls back to `/tmp`.
 fn holder_pidfile() -> std::path::PathBuf {
     let dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_owned());
