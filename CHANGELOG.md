@@ -21,7 +21,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `quotedbl`, ...) with "unsupported key name". Any name the built-in tables do
   not know is now looked up among the X keysym names, case-insensitively, with
   an exact-case match preferred (`Eacute` vs `eacute`).
-- **Modifiers on wlroots compositors and on niri (measured on Sway).** wlroots,
+- **Modifiers on wlroots compositors and on niri (measured on Sway; thanks @Konakonai, #3).** wlroots,
   and niri releases on smithay 0.7, do not derive modifier state from a virtual
   keyboard's key events (confirmed in their source), so on such sessions
   `key-sequence ctrl+c`, `hold-key` and
@@ -32,7 +32,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `pointer-click --modifier` burst releases the keys and the mask before the
   bridge exits (`128 + signal`), so a stopped command does not leave Ctrl
   held.
-- **First input lost on a seat without input devices.** Sway advertises a
+- **First input lost on a seat without input devices (thanks @Konakonai, #3).** Sway advertises a
   seat's pointer or keyboard capability only while a device provides it, so in
   a headless or nested session the bridge's fresh virtual device is what adds
   it, and clients had not bound `wl_pointer` / `wl_keyboard` yet when the
