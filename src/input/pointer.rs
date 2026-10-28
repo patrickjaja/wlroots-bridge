@@ -33,12 +33,13 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use wayland_client::QueueHandle;
-use wayland_client::protocol::wl_pointer;
+use wayland_client::protocol::{wl_pointer, wl_seat};
 use wayland_protocols_wlr::virtual_pointer::v1::client::{
     zwlr_virtual_pointer_manager_v1, zwlr_virtual_pointer_v1,
 };
 
 use crate::conn::Conn;
+use crate::input::signals::{SIGINT, SIGTERM, install_handler};
 use crate::output::{ButtonStateResult, DragActionResult, PointerActionResult};
 use crate::screens;
 
@@ -172,8 +173,10 @@ impl Pointer {
     fn create(conn: &Conn, qh: &QueueHandle<PointerState>) -> Result<Self> {
         let layout = layout_box(conn)?;
         let manager = conn.bind_virtual_pointer_manager(qh)?;
+        let had_pointer = conn.seat_has(wl_seat::Capability::Pointer);
         // No seat hint: the compositor assigns a default seat.
         let pointer = manager.create_virtual_pointer(None, qh, ());
+        conn.settle_new_device(had_pointer)?;
         Ok(Self { pointer, layout })
     }
 
@@ -267,7 +270,17 @@ pub fn click(
     for i in 0..repeat {
         if i > 0 {
             queue.flush().ok();
-            thread::sleep(Duration::from_millis(50));
+            let gap = Duration::from_millis(50);
+            let stopped = match &held_mods {
+                Some(held) => held.sleep(gap),
+                None => {
+                    thread::sleep(gap);
+                    false
+                }
+            };
+            if stopped {
+                break; // stop signal: release the modifiers below
+            }
         }
         ptr.button(evdev, true);
         ptr.frame();
@@ -278,7 +291,9 @@ pub fn click(
         .roundtrip(&mut PointerState)
         .context("pointer click roundtrip")?;
 
-    drop(held_mods); // releases the modifier keys (+ its own roundtrip)
+    if let Some(held) = held_mods {
+        held.release(); // modifier keys up, mask 0, roundtrip; exits on a stop signal
+    }
 
     Ok(PointerActionResult {
         action: "click".to_owned(),
@@ -525,14 +540,10 @@ fn read_pid(path: &std::path::Path) -> Option<i32> {
 
 // --- Minimal libc bindings (no libc crate; symbols exist in glibc + musl). ---
 
-const SIGINT: i32 = 2;
-const SIGTERM: i32 = 15;
-
 unsafe extern "C" {
     fn fork() -> i32;
     fn setsid() -> i32;
     fn kill(pid: i32, sig: i32) -> i32;
-    fn signal(sig: i32, handler: extern "C" fn(i32)) -> usize;
 }
 
 /// Send `sig` to `pid`; `sig == 0` probes existence.
@@ -543,15 +554,6 @@ fn signal_pid(pid: i32, sig: i32) -> Result<()> {
         Ok(())
     } else {
         Err(std::io::Error::last_os_error()).context("kill failed")
-    }
-}
-
-/// Install a signal handler (async-signal-safe body required by the caller).
-///
-/// SAFETY: `handler` must be async-signal-safe (ours only does an atomic store).
-unsafe fn install_handler(sig: i32, handler: extern "C" fn(i32)) {
-    unsafe {
-        signal(sig, handler);
     }
 }
 

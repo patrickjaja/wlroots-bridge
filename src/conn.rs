@@ -13,7 +13,7 @@
 
 use anyhow::{Context, Result, anyhow};
 use wayland_client::protocol::{wl_output, wl_registry, wl_seat, wl_shm};
-use wayland_client::{Connection, Dispatch, QueueHandle};
+use wayland_client::{Connection, Dispatch, Proxy, QueueHandle, WEnum};
 use wayland_protocols::xdg::xdg_output::zv1::client::zxdg_output_manager_v1;
 use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::zwp_virtual_keyboard_manager_v1;
 use wayland_protocols_wlr::screencopy::v1::client::zwlr_screencopy_manager_v1;
@@ -63,10 +63,16 @@ pub struct Globals {
     pub foreign_toplevel_ext: Option<BoundGlobal>,
     pub xdg_output_manager: Option<BoundGlobal>,
     pub seat: Option<BoundGlobal>,
+    /// How many `wl_seat` globals the compositor advertises.
+    pub seat_count: usize,
     pub shm: Option<BoundGlobal>,
     /// Every advertised wl_output (name, version).
     pub outputs: Vec<BoundGlobal>,
 }
+
+/// How long [`Conn::settle_new_device`] leaves clients to bind a seat
+/// capability that the new virtual device just added.
+const SETTLE_MS: u64 = 50;
 
 /// Shared connection + a live registry + the discovered globals.
 pub struct Conn {
@@ -106,9 +112,80 @@ impl Conn {
         })
     }
 
+    /// Whether the seat currently advertises `cap`. Call it before creating a
+    /// virtual device, to learn whether that device is what adds the
+    /// capability. Binds a throwaway `wl_seat` on a private queue; the
+    /// compositor sends `capabilities` right after the bind, so one roundtrip
+    /// delivers it. Any failure answers `false`, which only costs
+    /// [`Conn::settle_new_device`] its sleep. So does more than one seat: the
+    /// virtual pointer goes to the compositor's default seat, which need not
+    /// be the one we would probe.
+    pub fn seat_has(&self, cap: wl_seat::Capability) -> bool {
+        if self.globals.seat_count != 1 {
+            return false;
+        }
+        let Some(global) = self.globals.seat else {
+            return false;
+        };
+        let mut queue = self.conn.new_event_queue::<SeatProbe>();
+        let qh = queue.handle();
+        let seat: wl_seat::WlSeat = self.bind(global, 7, &qh, ());
+        let mut probe = SeatProbe::default();
+        let answered = queue.roundtrip(&mut probe).is_ok();
+        if seat.version() >= 5 {
+            seat.release();
+        }
+        answered && probe.caps.is_some_and(|caps| caps.contains(cap))
+    }
+
+    /// Call after creating a virtual pointer or keyboard (and, for the
+    /// keyboard, uploading its keymap), before sending events. The roundtrip
+    /// makes sure the compositor has processed the creation. When the seat
+    /// lacked the device's capability before (`had_capability == false`), the
+    /// new device is what adds it: Sway, for one, advertises pointer and
+    /// keyboard only while some device provides them, so on a seat without
+    /// physical input (headless, nested) clients learn of the capability only
+    /// now and bind `wl_pointer` / `wl_keyboard` in response. Events sent
+    /// before they have done so reach nobody, so we wait [`SETTLE_MS`] for
+    /// them. A seat that already had the capability costs only the roundtrip.
+    pub fn settle_new_device(&self, had_capability: bool) -> Result<()> {
+        let mut queue = self.conn.new_event_queue::<()>();
+        queue
+            .roundtrip(&mut ())
+            .context("failed the new-device roundtrip")?;
+        if !had_capability {
+            std::thread::sleep(std::time::Duration::from_millis(SETTLE_MS));
+        }
+        Ok(())
+    }
+
     /// The list of advertised `wl_output` globals, most-recently-added last.
     pub fn output_names(&self) -> &[BoundGlobal] {
         &self.globals.outputs
+    }
+}
+
+/// State for [`Conn::seat_has`]: the last `wl_seat.capabilities` received.
+#[derive(Default)]
+struct SeatProbe {
+    caps: Option<wl_seat::Capability>,
+}
+
+impl Dispatch<wl_seat::WlSeat, ()> for SeatProbe {
+    fn event(
+        state: &mut Self,
+        _seat: &wl_seat::WlSeat,
+        event: wl_seat::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        if let wl_seat::Event::Capabilities { capabilities } = event {
+            state.caps = Some(match capabilities {
+                WEnum::Value(caps) => caps,
+                WEnum::Unknown(raw) => wl_seat::Capability::from_bits_truncate(raw),
+            });
+        }
     }
 }
 
@@ -137,7 +214,10 @@ impl Dispatch<wl_registry::WlRegistry, ()> for RegistryState {
                 }
                 "ext_foreign_toplevel_list_v1" => state.globals.foreign_toplevel_ext = Some(bound),
                 "zxdg_output_manager_v1" => state.globals.xdg_output_manager = Some(bound),
-                "wl_seat" => state.globals.seat = Some(bound),
+                "wl_seat" => {
+                    state.globals.seat = Some(bound);
+                    state.globals.seat_count += 1;
+                }
                 "wl_shm" => state.globals.shm = Some(bound),
                 "wl_output" => state.globals.outputs.push(bound),
                 _ => {}

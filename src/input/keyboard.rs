@@ -9,12 +9,14 @@
 //!    `type`), build a keymap binding them + the four modifier keys to
 //!    sequential keycodes,
 //! 2. write the text to a memfd, upload it via `keymap`,
-//! 3. press modifiers (real keycodes, driven via `modifier_map`), tap the base
-//!    key(s), release in reverse.
+//! 3. press modifiers (real keycodes, driven via `modifier_map`, with the
+//!    depressed mask reported through `modifiers`), tap the base key(s),
+//!    release in reverse.
 //!
 //! `key` events carry Linux evdev codes (XKB keycode - 8), which is exactly what
 //! `generate_keymap` returns in each placement's `evdev_code`.
 
+use std::cell::Cell;
 use std::io::Write;
 use std::os::fd::AsFd;
 use std::thread;
@@ -22,12 +24,14 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use wayland_client::QueueHandle;
+use wayland_client::protocol::wl_seat;
 use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::{
     zwp_virtual_keyboard_manager_v1, zwp_virtual_keyboard_v1,
 };
 
 use crate::conn::Conn;
 use crate::input::keymap::{self, GeneratedKeymap};
+use crate::input::signals::StopSignals;
 use crate::output::{KeyboardActionResult, TypeActionResult};
 
 /// wl_keyboard key states (the virtual keyboard reuses these values).
@@ -37,6 +41,12 @@ const KEY_PRESSED: u32 = 1;
 const XKB_V1: u32 = 1;
 /// Small settle delay between key-sequence repeats (matches JS `sleep 0.008`).
 const KEY_REPEAT_MS: u64 = 8;
+/// Real-modifier bits of the `modifiers` depressed mask, matching the
+/// generated keymap's `modifier_map` (Shift, Control, Mod1, Mod4).
+const MOD_SHIFT: u32 = 1 << 0;
+const MOD_CONTROL: u32 = 1 << 2;
+const MOD_MOD1: u32 = 1 << 3;
+const MOD_MOD4: u32 = 1 << 6;
 
 struct KeyboardState;
 wayland_client::delegate_noop!(KeyboardState: ignore zwp_virtual_keyboard_manager_v1::ZwpVirtualKeyboardManagerV1);
@@ -47,6 +57,8 @@ wayland_client::delegate_noop!(KeyboardState: ignore wayland_client::protocol::w
 struct Keyboard {
     kb: zwp_virtual_keyboard_v1::ZwpVirtualKeyboardV1,
     keymap: GeneratedKeymap,
+    /// Depressed modifier mask last sent with `modifiers`.
+    mods: Cell<u32>,
 }
 
 impl Keyboard {
@@ -55,6 +67,7 @@ impl Keyboard {
         let keymap = keymap::generate_keymap(keysyms);
         let manager = conn.bind_virtual_keyboard_manager(qh)?;
         let seat = conn.bind_seat(qh)?;
+        let had_keyboard = conn.seat_has(wl_seat::Capability::Keyboard);
         let kb = manager.create_virtual_keyboard(&seat, qh, ());
 
         // Upload the keymap text (NUL-terminated) via a memfd.
@@ -62,13 +75,51 @@ impl Keyboard {
         bytes.push(0); // xkbcommon expects a NUL terminator
         let file = write_memfd(&bytes)?;
         kb.keymap(XKB_V1, file.as_fd(), bytes.len() as u32);
+        conn.settle_new_device(had_keyboard)?;
 
-        Ok(Self { kb, keymap })
+        Ok(Self {
+            kb,
+            keymap,
+            mods: Cell::new(0),
+        })
     }
 
+    /// Send a key event. A modifier key is followed by `modifiers` carrying
+    /// the new depressed mask: wlroots passes a virtual keyboard's keys on
+    /// without updating its modifier state from them, so without the mask
+    /// `ctrl+c` reaches the client as a plain `c`.
     fn key(&self, evdev_code: u32, pressed: bool) {
         let state = if pressed { KEY_PRESSED } else { KEY_RELEASED };
         self.kb.key(now_ms(), evdev_code, state);
+
+        let bit = match evdev_code {
+            c if c == self.keymap.shift_code => MOD_SHIFT,
+            c if c == self.keymap.ctrl_code => MOD_CONTROL,
+            c if c == self.keymap.alt_code => MOD_MOD1,
+            c if c == self.keymap.super_code => MOD_MOD4,
+            _ => return,
+        };
+        let mods = if pressed {
+            self.mods.get() | bit
+        } else {
+            self.mods.get() & !bit
+        };
+        self.set_modifiers(mods);
+    }
+
+    /// Report `mods` as the depressed mask (no latched/locked mods, group 0).
+    fn set_modifiers(&self, mods: u32) {
+        self.mods.set(mods);
+        self.kb.modifiers(mods, 0, 0, 0);
+    }
+
+    /// After releasing every held key: make sure the reported mask is 0.
+    /// The releases already clear each bit they set; this guards against a
+    /// mask left behind by anything else before the device goes away.
+    fn clear_modifiers(&self) {
+        if self.mods.get() != 0 {
+            self.set_modifiers(0);
+        }
     }
 }
 
@@ -290,6 +341,7 @@ pub fn hold_key(conn: &Conn, keys: &[String], duration_ms: u64) -> Result<Keyboa
         .map(|k| keymap::keysym_for_name(k))
         .collect::<Result<_>>()?;
 
+    let stop = StopSignals::install();
     let mut queue = conn.conn.new_event_queue::<KeyboardState>();
     let qh = queue.handle();
     let kb = Keyboard::create(conn, &qh, &base_keysyms)?;
@@ -312,7 +364,8 @@ pub fn hold_key(conn: &Conn, keys: &[String], duration_ms: u64) -> Result<Keyboa
     }
     queue.flush().ok();
 
-    thread::sleep(Duration::from_millis(duration_ms));
+    // A stop signal ends the hold early; the keys are released below either way.
+    stop.sleep(Duration::from_millis(duration_ms));
 
     // Release base keys (reverse), shift, then modifiers (reverse).
     for p in kb.keymap.placements.iter().rev() {
@@ -324,9 +377,11 @@ pub fn hold_key(conn: &Conn, keys: &[String], duration_ms: u64) -> Result<Keyboa
     for &code in mod_codes.iter().rev() {
         kb.key(code, false);
     }
+    kb.clear_modifiers();
     queue
         .roundtrip(&mut KeyboardState)
         .context("hold-key roundtrip")?;
+    StopSignals::exit_if_received();
 
     Ok(KeyboardActionResult {
         action: "hold-key".to_owned(),
@@ -337,16 +392,19 @@ pub fn hold_key(conn: &Conn, keys: &[String], duration_ms: u64) -> Result<Keyboa
 }
 
 /// A set of modifier keys held on a virtual keyboard for the lifetime of the
-/// value, for chording pointer clicks (Ctrl+click). Released on drop.
+/// value, for chording pointer clicks (Ctrl+click). Released on drop, or by
+/// [`ModifierHold::release`], which also exits on a stop signal.
 pub struct ModifierHold {
     kb: Keyboard,
     codes: Vec<u32>,
     queue: wayland_client::EventQueue<KeyboardState>,
+    stop: StopSignals,
 }
 
 impl ModifierHold {
     /// Press the given modifier names and keep them held.
     pub fn press(conn: &Conn, modifiers: &[String]) -> Result<Self> {
+        let stop = StopSignals::install();
         let mut queue = conn.conn.new_event_queue::<KeyboardState>();
         let qh = queue.handle();
         // A keymap with no base keys still binds the four modifier keys.
@@ -361,7 +419,24 @@ impl ModifierHold {
         queue
             .roundtrip(&mut KeyboardState)
             .context("modifier press roundtrip")?;
-        Ok(Self { kb, codes, queue })
+        Ok(Self {
+            kb,
+            codes,
+            queue,
+            stop,
+        })
+    }
+
+    /// Sleep while the modifiers stay held; `true` if a stop signal ended it.
+    pub fn sleep(&self, duration: Duration) -> bool {
+        self.stop.sleep(duration)
+    }
+
+    /// Release the modifiers now; if a stop signal arrived meanwhile, exit
+    /// as it asked once they are up.
+    pub fn release(self) {
+        drop(self);
+        StopSignals::exit_if_received();
     }
 }
 
@@ -370,6 +445,7 @@ impl Drop for ModifierHold {
         for &code in self.codes.iter().rev() {
             self.kb.key(code, false);
         }
+        self.kb.clear_modifiers();
         // Best-effort release before the connection closes.
         let _ = self.queue.roundtrip(&mut KeyboardState);
     }
@@ -388,5 +464,14 @@ mod tests {
         assert_eq!(KEY_PRESSED, 1);
         assert_eq!(KEY_RELEASED, 0);
         assert_eq!(XKB_V1, 1);
+    }
+
+    #[test]
+    fn modifier_bits_match_real_modifier_indices() {
+        // xkb real modifiers: Shift=0, Lock=1, Control=2, Mod1=3 .. Mod5=7.
+        assert_eq!(MOD_SHIFT, 0x1);
+        assert_eq!(MOD_CONTROL, 0x4);
+        assert_eq!(MOD_MOD1, 0x8);
+        assert_eq!(MOD_MOD4, 0x40);
     }
 }

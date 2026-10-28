@@ -112,6 +112,22 @@ keyname  := <CU key-name from table> | <single literal char>
   `pageup`/`page_up`->`Prior`, `pagedown`/`page_down`->`Next`,
   `capslock`->`Caps_Lock`. Anything else passes through as a keysym by char/name.
 
+## New virtual devices
+
+Every command creates its virtual pointer or keyboard afresh, and the device
+lives only as long as the process. Sway advertises a seat's pointer and
+keyboard capabilities only while some device provides them; with no physical
+input (headless, nested) the new device is what adds the capability, and
+clients bind `wl_pointer` / `wl_keyboard` only after they see it, so events sent
+in the same burst as the device's creation reach nobody. Before creating a
+device the bridge reads `wl_seat.capabilities` (`Conn::seat_has`); after
+creating it (and, for the keyboard, uploading the keymap) it does a roundtrip
+and, only if the capability was absent before, waits 50 ms
+(`Conn::settle_new_device`). A seat with a keyboard and pointer costs one extra
+roundtrip per device. In the per-char path of `type` (more than 200 distinct
+glyphs) the earlier keyboards stay alive until the process exits, so only the
+first one waits.
+
 ## Keymap generation
 
 The `zwp_virtual_keyboard_v1` protocol requires uploading an XKB keymap fd
@@ -124,9 +140,18 @@ XKB keymap text ourselves** (the wtype technique, hand-rolled in
   Alt, Super with proper `modifier_map` entries), then one keycode per requested
   keysym.
 - Each requested keysym is bound at **both** shift levels of its keycode to the
-  exact glyph, so a stray Shift never corrupts it. Modifiers are driven as real
-  keys (wtype's approach), not via the `modifiers()` bitmask - it is more
-  reliable across Sway/Hyprland/Niri.
+  exact glyph, so a stray Shift never corrupts it. Modifiers are sent both
+  ways: as key events on their real keycodes, and, after every modifier press
+  or release, as `modifiers()` with the depressed real-mod mask (Shift `0x1`,
+  Control `0x4`, Mod1 `0x8`, Mod4 `0x40`, matching the generated
+  `modifier_map`). wtype sends only `modifiers()`. wlroots (and niri on smithay
+  0.7) passes virtual-keyboard keys on without updating its modifier state
+  from them, so without the mask `ctrl+c` reaches the client as a plain `c`.
+- The mask is compositor state that smithay does not reset when the device is
+  destroyed, so `hold-key` and `pointer-click --modifier` catch SIGTERM,
+  SIGINT and SIGHUP (`src/input/signals.rs`): the signal ends the wait early,
+  the normal release path runs (keys up, mask 0, roundtrip) and the process
+  exits `128 + signal`. SIGKILL cannot be caught.
 - Named keys use their X keysym name (`Return`, `space`, `F5`); Latin-1 glyphs
   their name (`eacute`) or `U00E9`; CJK/emoji the Unicode symbol name
   (`U597D`, `U1F600`) via the keysym encoding `0x01000000 | codepoint`.

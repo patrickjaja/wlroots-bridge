@@ -16,6 +16,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **X keysym names for punctuation.** `key-sequence` and `hold-key` rejected
+  the names xdotool takes (`ctrl+comma`, `ctrl+bracketleft`, `asciitilde`,
+  `quotedbl`, ...) with "unsupported key name". Any name the built-in tables do
+  not know is now looked up among the X keysym names, case-insensitively, with
+  an exact-case match preferred (`Eacute` vs `eacute`).
+- **Modifiers on wlroots compositors and on niri (measured on Sway).** wlroots,
+  and niri releases on smithay 0.7, do not derive modifier state from a virtual
+  keyboard's key events (confirmed in their source), so on such sessions
+  `key-sequence ctrl+c`, `hold-key` and
+  `pointer-click --modifier` delivered the bare key or click. Each modifier
+  press or release now also sends `modifiers()` with the depressed mask
+  (Shift `0x1`, Control `0x4`, Mod1 `0x8`, Mod4 `0x40`); the mask is back at 0
+  when the command ends. SIGTERM, SIGINT or SIGHUP during `hold-key` or a
+  `pointer-click --modifier` burst releases the keys and the mask before the
+  bridge exits (`128 + signal`), so a stopped command does not leave Ctrl
+  held.
+- **First input lost on a seat without input devices.** Sway advertises a
+  seat's pointer or keyboard capability only while a device provides it, so in
+  a headless or nested session the bridge's fresh virtual device is what adds
+  it, and clients had not bound `wl_pointer` / `wl_keyboard` yet when the
+  events arrived: clicks did nothing and `type` dropped its first character.
+  The bridge now reads the seat's capabilities before creating a device, does a
+  roundtrip after creating it, and waits 50 ms only when the device added the
+  capability. A seat that already has a keyboard or pointer, the usual desktop,
+  pays no wait.
 - **Screencopy wait is a 2 s wall-clock deadline, not 200 roundtrips.** Each
   roundtrip returns as soon as the compositor answers its sync request, before
   a frame is rendered, so the old wait ended too early for compositors that

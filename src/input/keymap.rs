@@ -232,7 +232,35 @@ pub fn keysym_for_name(name: &str) -> Result<u32> {
         return keysym_for_char(ch);
     }
 
+    if let Some(value) = keysym_from_x_name(&resolved) {
+        return Ok(value);
+    }
+
     bail!("unsupported key name `{name}` (resolved keysym name `{resolved}`)")
+}
+
+/// Look a keysym up by its X name (`comma`, `bracketleft`, `asciitilde`,
+/// `eacute`, an optional `XK_` prefix), the names xdotool takes. An exact
+/// match wins; otherwise the first case-insensitive one (`COMMA` -> `comma`),
+/// so `Eacute` and `eacute` stay distinct. Scans the named keysym ranges
+/// (Latin-1 through the 0xffxx function block, plus the XF86 block); this runs
+/// only for names the tables above do not know.
+fn keysym_from_x_name(name: &str) -> Option<u32> {
+    let name = name.strip_prefix("XK_").unwrap_or(name);
+    let mut folded = None;
+    for raw in (0x0020..=0xffff_u32).chain(0x1008_ff00..=0x1008_ffff) {
+        let Some(x_name) = XKeysym::new(raw).name() else {
+            continue;
+        };
+        let x_name = x_name.strip_prefix("XK_").unwrap_or(x_name);
+        if x_name == name {
+            return Some(raw);
+        }
+        if folded.is_none() && x_name.eq_ignore_ascii_case(name) {
+            folded = Some(raw);
+        }
+    }
+    folded
 }
 
 /// Map a Unicode scalar to an X11 keysym.
@@ -483,6 +511,69 @@ mod tests {
         assert_eq!(keysym_for_name("a").unwrap(), u32::from('a'));
         assert_eq!(keysym_for_name("A").unwrap(), u32::from('A'));
         assert_eq!(keysym_for_name("é").unwrap(), 0x0e9);
+    }
+
+    #[test]
+    fn x_keysym_names_resolve() {
+        let names = [
+            ("comma", ','),
+            ("period", '.'),
+            ("slash", '/'),
+            ("backslash", '\\'),
+            ("semicolon", ';'),
+            ("apostrophe", '\''),
+            ("quotedbl", '"'),
+            ("grave", '`'),
+            ("minus", '-'),
+            ("equal", '='),
+            ("plus", '+'),
+            ("bracketleft", '['),
+            ("bracketright", ']'),
+            ("braceleft", '{'),
+            ("braceright", '}'),
+            ("parenleft", '('),
+            ("parenright", ')'),
+            ("less", '<'),
+            ("greater", '>'),
+            ("question", '?'),
+            ("colon", ':'),
+            ("underscore", '_'),
+            ("bar", '|'),
+            ("asciitilde", '~'),
+            ("exclam", '!'),
+            ("at", '@'),
+            ("numbersign", '#'),
+            ("dollar", '$'),
+            ("percent", '%'),
+            ("asciicircum", '^'),
+            ("ampersand", '&'),
+            ("asterisk", '*'),
+            ("space", ' '),
+        ];
+        for (name, ch) in names {
+            let want = u32::from(ch);
+            assert_eq!(keysym_for_name(name).unwrap(), want, "{name}");
+            assert_eq!(
+                keysym_for_name(&name.to_uppercase()).unwrap(),
+                want,
+                "{name} upper"
+            );
+            // The keymap must name it the way xkbcommon parses it back.
+            assert_eq!(xkb_symbol_name(want), name);
+        }
+        assert_eq!(keysym_for_name("XK_comma").unwrap(), 0x2c);
+        // Exact case wins where X names differ only by case.
+        assert_eq!(keysym_for_name("Eacute").unwrap(), 0xc9);
+        assert_eq!(keysym_for_name("eacute").unwrap(), 0xe9);
+        assert!(keysym_for_name("notakeysym").is_err());
+    }
+
+    #[test]
+    fn x_keysym_names_work_in_key_specs() {
+        let spec = parse_spec("ctrl+comma").unwrap();
+        assert_eq!(keysym_for_name(&spec.base).unwrap(), 0x2c);
+        let spec = parse_spec("ctrl+bracketleft").unwrap();
+        assert_eq!(keysym_for_name(&spec.base).unwrap(), 0x5b);
     }
 
     #[test]
