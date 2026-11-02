@@ -35,6 +35,7 @@ pub fn doctor() -> DoctorReport {
         wayland_display: None,
         compositor: None,
         globals: None,
+        atspi: crate::ax::doctor_atspi(),
     };
 
     match connected {

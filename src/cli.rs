@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -9,6 +9,15 @@ use clap::{Parser, Subcommand};
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
+}
+
+/// `ax-action --action` values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum AxActionKind {
+    Click,
+    Focus,
+    /// Text comes from stdin (UTF-8, whole stdin, no trimming).
+    SetText,
 }
 
 #[derive(Debug, Subcommand)]
@@ -129,4 +138,46 @@ pub enum Command {
     SessionEnd,
     /// Forget the remembered screen-sharing grant. Nothing to forget on wlroots.
     ForgetSession,
+    /// Turn accessibility on for the Claude process (leased; screen readers untouched).
+    AxEnable {
+        #[arg(long)]
+        holder_pid: u32,
+    },
+    /// Release the accessibility lease of a holder.
+    AxRestore {
+        #[arg(long)]
+        holder_pid: u32,
+    },
+    /// List a window's accessible elements (AT-SPI).
+    AxFind {
+        #[arg(long)]
+        window: String,
+        #[arg(long)]
+        role: Option<String>,
+        #[arg(long)]
+        title_contains: Option<String>,
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        include_hidden: bool,
+        #[arg(long)]
+        max_nodes: Option<usize>,
+        #[arg(long)]
+        max_depth: Option<u32>,
+        /// app id the caller listed for this window; a mismatch yields `window_changed`.
+        #[arg(long)]
+        expect_app_id: Option<String>,
+        /// title the caller listed for this window; a mismatch yields `window_changed`.
+        #[arg(long)]
+        expect_title: Option<String>,
+    },
+    /// Act on an element returned by `ax-find` (click, focus, set-text via stdin).
+    AxAction {
+        #[arg(long)]
+        scope: String,
+        #[arg(long = "ref")]
+        element_ref: String,
+        #[arg(long, value_enum)]
+        action: AxActionKind,
+    },
 }

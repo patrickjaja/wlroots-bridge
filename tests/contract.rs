@@ -175,3 +175,99 @@ fn bogus_subcommand_exits_two() {
     let out = run(&["definitely-not-a-command"]);
     assert_eq!(out.status.code(), Some(2));
 }
+
+fn run_with_stdin(args: &[&str], stdin: &[u8]) -> Output {
+    use std::io::Write;
+    use std::process::Stdio;
+    let home = scratch("home");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_wlroots-bridge"))
+        .args(args)
+        .env_clear()
+        .env("HOME", &home)
+        .env("XDG_STATE_HOME", home.join("state"))
+        .env("XDG_RUNTIME_DIR", home.join("run"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn wlroots-bridge");
+    child.stdin.take().unwrap().write_all(stdin).unwrap();
+    child.wait_with_output().unwrap()
+}
+
+#[test]
+fn ax_usage_errors_exit_two() {
+    for args in [
+        &["ax-enable"][..],
+        &["ax-restore", "--holder-pid", "x"],
+        &["ax-find"],
+        &["ax-action", "--scope", "s", "--ref", "r"],
+        &[
+            "ax-action",
+            "--scope",
+            "s",
+            "--ref",
+            "r",
+            "--action",
+            "bogus",
+        ],
+        &[
+            "ax-action",
+            "--scope",
+            "s",
+            "--ref",
+            "r",
+            "--action",
+            "set-text",
+            "--text",
+            "no",
+        ],
+    ] {
+        assert_eq!(run(args).status.code(), Some(2), "{args:?}");
+    }
+}
+
+#[test]
+fn doctor_has_atspi_key_and_window_ipc() {
+    let out = run(&["doctor"]);
+    assert_eq!(out.status.code(), Some(0));
+    let v = stdout_json(&out);
+    assert!(v["atspi"]["bus"].is_boolean());
+    assert!(v["atspi"].get("window_ipc").is_some());
+    assert!(v["atspi"]["window_ipc"].is_null());
+}
+
+#[test]
+fn ax_action_set_text_rejects_invalid_utf8_stdin_with_exit_two() {
+    let out = run_with_stdin(
+        &[
+            "ax-action",
+            "--scope",
+            "s",
+            "--ref",
+            "r",
+            "--action",
+            "set-text",
+        ],
+        &[0xff, 0xfe],
+    );
+    assert_eq!(out.status.code(), Some(2));
+}
+
+#[test]
+fn ax_action_click_without_bus_is_unavailable_exit_zero() {
+    let out = run_with_stdin(
+        &[
+            "ax-action",
+            "--scope",
+            "v1|:1.1|/x|1",
+            "--ref",
+            ":1.1/org/a11y/atspi/accessible/1",
+            "--action",
+            "click",
+        ],
+        b"",
+    );
+    assert_eq!(out.status.code(), Some(0));
+    assert!(stdout_json(&out)["unavailable"].is_string());
+}

@@ -32,12 +32,12 @@ use crate::output::{AppRef, Rect, WindowInfo};
 
 /// A collected toplevel, protocol-agnostic.
 #[derive(Debug, Clone, Default)]
-struct Toplevel {
+pub(crate) struct Toplevel {
     /// Synthetic stable id: the protocol object id as a decimal string, or (for
     /// the ext protocol) its `identifier` string when provided.
-    id: String,
-    app_id: Option<String>,
-    title: Option<String>,
+    pub(crate) id: String,
+    pub(crate) app_id: Option<String>,
+    pub(crate) title: Option<String>,
     activated: bool,
     minimized: bool,
     /// Order the compositor announced this toplevel (used for stacking_order).
@@ -279,7 +279,7 @@ impl Dispatch<ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1, ()> fo
 /// (indexed parallel to the returned Vec after filtering closed ones is NOT
 /// done here - callers that need activation use [`activate_window`], which does
 /// its own wlr roundtrip).
-fn collect_toplevels(conn: &Conn) -> Result<Vec<Toplevel>> {
+pub(crate) fn collect_toplevels(conn: &Conn) -> Result<Vec<Toplevel>> {
     if let Some(g) = conn.globals.foreign_toplevel_wlr {
         let mut queue = conn.conn.new_event_queue::<WlrState>();
         let qh = queue.handle();

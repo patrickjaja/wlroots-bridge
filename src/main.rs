@@ -1,3 +1,4 @@
+mod ax;
 mod capture;
 mod cli;
 mod conn;
@@ -23,6 +24,9 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("{error:#}");
+            if error.downcast_ref::<ax::UsageError>().is_some() {
+                return ExitCode::from(2);
+            }
             ExitCode::FAILURE
         }
     }
@@ -53,6 +57,49 @@ fn run() -> Result<()> {
 
         Command::Doctor => {
             print_json(&doctor::doctor())?;
+        }
+        Command::AxEnable { holder_pid } => {
+            print_json(&cu_atspi::blocking::enable(holder_pid)?)?;
+        }
+        Command::AxRestore { holder_pid } => {
+            print_json(&cu_atspi::blocking::restore(holder_pid)?)?;
+        }
+        Command::AxFind {
+            window,
+            role,
+            title_contains,
+            all,
+            include_hidden,
+            max_nodes,
+            max_depth,
+            expect_app_id,
+            expect_title,
+        } => {
+            let conn = Conn::connect()?;
+            let opts = ax::FindOptions {
+                role,
+                title_contains,
+                all,
+                include_hidden,
+                max_nodes,
+                max_depth,
+                expect_app_id,
+                expect_title,
+            };
+            print_json(&ax::find(&conn, &window, opts)?)?;
+        }
+        Command::AxAction {
+            scope,
+            element_ref,
+            action,
+        } => {
+            // set-text reads the text from stdin only (never argv, never logged).
+            let action = match action {
+                cli::AxActionKind::Click => cu_atspi::Action::Click,
+                cli::AxActionKind::Focus => cu_atspi::Action::Focus,
+                cli::AxActionKind::SetText => cu_atspi::Action::SetText(ax::read_stdin_text()?),
+            };
+            print_json(&cu_atspi::blocking::action(&element_ref, &action, &scope)?)?;
         }
         Command::Screens => {
             let conn = Conn::connect()?;

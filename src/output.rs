@@ -213,6 +213,8 @@ pub struct DoctorReport {
     pub compositor: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub globals: Option<DoctorGlobals>,
+    /// AT-SPI status (additive key, contract v1). Never fails the doctor.
+    pub atspi: serde_json::Value,
 }
 
 /// Presence + bound version of each global we depend on. `Some(v)` = advertised
