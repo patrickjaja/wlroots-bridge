@@ -48,6 +48,13 @@ pub enum Command {
     Screenshot {
         #[arg(long)]
         display: Option<String>,
+        /// Mask mode: keep this window (an id from `windows`; repeatable) and
+        /// paint everything else #1E1E1E. sway and Hyprland only; fails closed.
+        #[arg(long = "keep-window", value_name = "ID")]
+        keep_window: Vec<String>,
+        /// Mask mode with nothing kept: the whole image is #1E1E1E.
+        #[arg(long, conflicts_with = "keep_window")]
+        mask_all: bool,
     },
     /// Capture a logical region within a display and return an executor-style zoom image.
     Zoom {
@@ -61,6 +68,13 @@ pub enum Command {
         w: i32,
         #[arg(long)]
         h: i32,
+        /// Mask mode: keep this window (an id from `windows`; repeatable) and
+        /// paint everything else #1E1E1E. sway and Hyprland only; fails closed.
+        #[arg(long = "keep-window", value_name = "ID")]
+        keep_window: Vec<String>,
+        /// Mask mode with nothing kept: the whole image is #1E1E1E.
+        #[arg(long, conflicts_with = "keep_window")]
+        mask_all: bool,
     },
     /// Move the pointer to a global point.
     PointerMove {

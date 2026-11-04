@@ -4,6 +4,8 @@ mod cli;
 mod conn;
 mod doctor;
 mod input;
+mod ipc;
+mod mask;
 mod output;
 mod screens;
 mod transform;
@@ -129,9 +131,14 @@ fn run() -> Result<()> {
             let conn = Conn::connect()?;
             print_json(&wm::activate_window(&conn, &window)?)?;
         }
-        Command::Screenshot { display } => {
+        Command::Screenshot {
+            display,
+            keep_window,
+            mask_all,
+        } => {
             let conn = Conn::connect()?;
-            print_json(&capture::screenshot(&conn, display.as_deref())?)?;
+            let mask = mask::MaskRequest::from_flags(keep_window, mask_all);
+            print_json(&capture::screenshot(&conn, display.as_deref(), &mask)?)?;
         }
         Command::Zoom {
             display,
@@ -139,9 +146,20 @@ fn run() -> Result<()> {
             y,
             w,
             h,
+            keep_window,
+            mask_all,
         } => {
             let conn = Conn::connect()?;
-            print_json(&capture::zoom(&conn, display.as_deref(), x, y, w, h)?)?;
+            let mask = mask::MaskRequest::from_flags(keep_window, mask_all);
+            print_json(&capture::zoom(
+                &conn,
+                display.as_deref(),
+                x,
+                y,
+                w,
+                h,
+                &mask,
+            )?)?;
         }
         Command::PointerMove { x, y } => {
             let conn = Conn::connect()?;

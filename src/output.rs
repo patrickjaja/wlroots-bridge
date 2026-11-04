@@ -28,7 +28,7 @@ pub fn print_json<T: Serialize>(value: &T) -> Result<()> {
 ///
 /// Matches x11-bridge / kwin-portal-bridge `Rect` and the nested `geometry`
 /// object the JS reads from `screens` / `windows`.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct Rect {
     pub x: i32,
     pub y: i32,
@@ -67,6 +67,9 @@ pub struct ScreenshotResult {
     pub display_id: String,
     pub origin_x: i32,
     pub origin_y: i32,
+    /// Present only in mask mode (`--keep-window` / `--mask-all`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mask: Option<crate::mask::MaskReport>,
 }
 
 /// A region (zoom) capture. Matches the JS `zoom` reader (`result.base64`,
@@ -76,6 +79,9 @@ pub struct ScreenshotCapture {
     pub base64: String,
     pub width: u32,
     pub height: u32,
+    /// Present only in mask mode (`--keep-window` / `--mask-all`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mask: Option<crate::mask::MaskReport>,
 }
 
 /// A window entry. Field names match x11-bridge `WindowInfo` and the JS
@@ -83,9 +89,10 @@ pub struct ScreenshotCapture {
 /// camelCase) - the JS reads `window.desktop_file_name`, `window.resource_class`,
 /// `window.is_minimized`, `window.stacking_order`, etc.
 ///
-/// wlroots-specific: the foreign-toplevel protocols do NOT expose geometry, so
-/// `geometry` is always `{0,0,0,0}` and `exclude_from_capture` is always false.
-/// See DESIGN.md.
+/// wlroots-specific: the foreign-toplevel protocols do NOT expose geometry.
+/// On sway / Hyprland it comes from the compositor IPC for windows that match
+/// unambiguously; otherwise `geometry` is `{0,0,0,0}` and `output` null.
+/// `exclude_from_capture` is always false. See DESIGN.md.
 #[derive(Debug, Clone, Serialize)]
 pub struct WindowInfo {
     pub id: String,
@@ -215,6 +222,16 @@ pub struct DoctorReport {
     pub globals: Option<DoctorGlobals>,
     /// AT-SPI status (additive key, contract v1). Never fails the doctor.
     pub atspi: serde_json::Value,
+    /// Additive: `windows` reports real geometry/output/visibility (sway or
+    /// Hyprland IPC answered and a foreign-toplevel protocol is advertised).
+    pub window_geometry: bool,
+    /// Additive: `screenshot`/`zoom` accept `--keep-window` (IPC with every
+    /// mask input answered and screencopy is advertised). `--mask-all` needs
+    /// only screencopy.
+    pub screenshot_mask: bool,
+    /// Additive: what a masked capture cannot see and so leaves unmasked when
+    /// drawn over a kept window (empty when `screenshot_mask` is false).
+    pub screenshot_mask_gaps: Vec<&'static str>,
 }
 
 /// Presence + bound version of each global we depend on. `Some(v)` = advertised

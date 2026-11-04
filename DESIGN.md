@@ -64,8 +64,8 @@ snake_case.
 |---|---|---|
 | `doctor` | contract v1 keys (see below) plus, when the compositor is reachable, `{wayland_display, compositor, globals:{virtual_pointer, virtual_keyboard, screencopy, foreign_toplevel_wlr, foreign_toplevel_ext, xdg_output, wl_output_count, wl_seat, wl_shm}}` | always exit 0 |
 | `screens` | `[{id, name, geometry:{x,y,width,height}, scale, refresh_millihz, is_active, is_primary}]` | `mapRustScreenToDisplay` reads `geometry.*`, `scale`, `is_primary`, `name`, `id` (-> `_bridgeId`) |
-| `screenshot [--display N]` | `{base64, width, height, displayWidth, displayHeight, displayId, originX, originY}` (camelCase) | `screenshotResultFromRust` reads `result.displayWidth`/`displayHeight`/`originX`/`originY` |
-| `zoom --x --y --w --h [--display N]` | `{base64, width, height}` | `zoom` reads `result.base64`/`width`/`height` |
+| `screenshot [--display N] [--keep-window ID]... [--mask-all]` | `{base64, width, height, displayWidth, displayHeight, displayId, originX, originY, mask?}` (camelCase) | `screenshotResultFromRust` reads `result.displayWidth`/`displayHeight`/`originX`/`originY` |
+| `zoom --x --y --w --h [--display N] [--keep-window ID]... [--mask-all]` | `{base64, width, height, mask?}` | `zoom` reads `result.base64`/`width`/`height` |
 | `windows` | `[{id, title, geometry, pid, desktop_file_name, resource_class, resource_name, window_role, window_type, is_dock, is_desktop, is_visible, is_minimized, is_normal_window, is_dialog, transient, transient_for, output, stacking_order, is_active, exclude_from_capture, keep_above}]` (snake_case) | `_appRefFromWindow` / `openApp` read `desktop_file_name`, `resource_class`, `is_minimized`, `is_visible`, `is_active`, `is_dock`, `is_desktop`, `title`, `id` |
 | `cursor-position` | **error, exit 1** (unqueryable) | `getCursorPosition` uses Electron `getCursorScreenPoint()` instead |
 | `frontmost-app` | `{bundleId, displayName}` (camelCase) | `_appRefFromCommand` reads `result.bundleId`/`displayName` |
@@ -227,10 +227,9 @@ of the three primary compositors actually take, but it broadens coverage.
 
 **Contract deviations (wlroots-specific):**
 
-- Neither protocol exposes **geometry**, so every `WindowInfo.geometry` is
-  `{0,0,0,0}`. Documented; the JS window helpers that matter
-  (`_appRefFromWindow`, `openApp` matching) key off `app_id`/`title`/state, not
-  geometry.
+- Neither protocol exposes **geometry**. On sway and Hyprland it comes from the
+  compositor IPC (see "Window geometry"); elsewhere every `WindowInfo.geometry`
+  is `{0,0,0,0}`.
 - `app-under-point` therefore returns **null** (best-effort unsupported) - there
   is no geometry to hit-test.
 - `resource_class` and `desktop_file_name` are both set to the `app_id`;
@@ -246,6 +245,62 @@ clients that connect through a Wayland security-context (sandboxed clients). The
 bridge runs as an ordinary client (launched by Claude Desktop, not inside a
 sandbox), so it gets full access; a future sandboxed deployment would see these
 globals disappear from the registry, which `doctor` would surface.
+
+## Window geometry (sway, Hyprland)
+
+The foreign-toplevel protocols carry no geometry, so `windows` reads the
+compositor IPC (`src/ipc.rs`): sway `GET_TREE`, Hyprland `j/clients` +
+`j/monitors`. A window gets `geometry` (global logical px, the space `screens`
+uses), `output` (set only when it names a `screens` id), `pid`, `is_visible` and
+an IPC-ordered `stacking_order` when its app id + title pair is unique among the
+toplevels AND among the IPC windows. Two windows with the same app id and title
+stay without geometry - never guessed. XWayland windows match on their X class
+(what both compositors report as the toplevel app id). niri, river and others
+keep the protocol-only answer (`geometry` `{0,0,0,0}`, `output` null).
+
+- Rects: sway container `rect` (borders included, title/tab bar excluded);
+  Hyprland `at`/`size` (client box, border excluded).
+- `is_visible`: sway `visible` (false for hidden tabs, other workspaces,
+  scratchpad, under a fullscreen view); Hyprland: mapped, not `hidden` (group
+  member), on an active or open special workspace, or pinned.
+- `stacking_order`: back-to-front rank. Matched windows: tiled < floating
+  (sway: floating list order; Hyprland: focus recency, special workspace above
+  regular) < fullscreen; every unmatched window ranks below them in
+  enumeration order.
+
+## Mask mode (`screenshot` / `zoom`)
+
+`--keep-window <id>` (repeatable; ids from `windows`) keeps the visible parts of
+those windows and paints everything else #1E1E1E: desktop, bars, other windows,
+Claude's own window. `--mask-all` paints the whole image (no IPC needed). The
+result gains `mask: {mode: "keep"|"all", kept: [{id, appId, title, visible}],
+regions: [{x,y,width,height}]}` so the caller can check every kept id still
+named the window it listed (ids are per-connection protocol ids and can shift
+when a window opens or closes in between).
+
+A kept window's region is its IPC rect minus every other visible window that
+may be above it (only a tiled window on the same workspace under a floating or
+fullscreen kept window is known to be below; floating-over-floating is always
+cut), minus Hyprland layer surfaces on the `top`/`overlay` levels, minus the
+four `decoration:rounding` corner squares on Hyprland. The regions are mapped
+onto the captured image, which is already in logical orientation (the output
+transform is undone first), with exact integer math, rounding kept areas
+inward, so a partly covered pixel is masked (1.25/1.5 scales included).
+
+The IPC is read before and after the copy; the frame is used only when both
+give the same plan (one retry). Fails closed, no image: no IPC, an unknown id,
+a kept window that shares its app id + title with a window that is not kept, a
+kept window with no unambiguous IPC match, or a visible window with no
+geometry. A kept window that is not visible keeps nothing (fully masked image,
+`visible:false`).
+
+Not masked when drawn over a kept window (`doctor.screenshot_mask_gaps`):
+popups/menus of any app (not in either IPC), on sway also layer-shell
+`top`/`overlay` surfaces (notifications) and unmanaged XWayland windows (X
+menus, tooltips). A kept app's own popups are masked where they extend beyond
+its rect. Also inherent: a translucent kept window shows what is beneath it, and
+Hyprland reports animation goals, so a window mid-animation is masked at its
+final position.
 
 ## cursor-position
 
@@ -273,6 +328,10 @@ The bridge implements the Computer Use bridge CLI contract v1
   `{"ok":true,"ended":false,"daemon":"none"}`; `forget-session` ->
   `{"ok":true,"ended":false,"daemon":"none","token_removed":false,"token_path":null}`.
   There is no daemon and no grant, so none of them has side effects.
+- Additive `doctor` keys: `window_geometry` (sway/Hyprland IPC answered and a
+  foreign-toplevel protocol is advertised), `screenshot_mask` (`window_geometry`,
+  the full mask IPC read succeeded and screencopy is advertised) and
+  `screenshot_mask_gaps` (see "Mask mode"). All false/empty elsewhere.
 - Every coordinate flag accepts negative values (layouts can start left of or
   above the origin).
 - `tests/contract.rs` runs these checks against the binary without a compositor.

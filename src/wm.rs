@@ -13,9 +13,13 @@
 //!
 //! ## Contract deviations (documented in DESIGN.md)
 //!
-//! Neither protocol exposes window geometry, so every `WindowInfo.geometry` is
-//! `{0,0,0,0}` and `app-under-point` returns an empty result (best-effort
-//! unsupported). `exclude_from_capture` is always false. `resource_class` /
+//! Neither protocol exposes window geometry. On sway and Hyprland `windows`
+//! fills `geometry`, `output`, `pid`, `is_visible` and `stacking_order` from the
+//! compositor IPC ([`crate::ipc`]) for every window whose app id + title pair is
+//! unique on both sides; any other window (and every window on other
+//! compositors) keeps `geometry` `{0,0,0,0}` and `output` null.
+//! `app-under-point` returns an empty result (best-effort unsupported).
+//! `exclude_from_capture` is always false. `resource_class` /
 //! `desktop_file_name` are both set to the `app_id`; `resource_name` is null.
 
 use anyhow::{Result, bail};
@@ -42,6 +46,18 @@ pub(crate) struct Toplevel {
     minimized: bool,
     /// Order the compositor announced this toplevel (used for stacking_order).
     order: usize,
+}
+
+#[cfg(test)]
+impl Toplevel {
+    pub(crate) fn for_test(id: &str, app_id: &str, title: &str) -> Self {
+        Toplevel {
+            id: id.to_owned(),
+            app_id: Some(app_id.to_owned()),
+            title: Some(title.to_owned()),
+            ..Default::default()
+        }
+    }
 }
 
 impl Toplevel {
@@ -321,10 +337,56 @@ pub(crate) fn collect_toplevels(conn: &Conn) -> Result<Vec<Toplevel>> {
     }
 }
 
-/// List windows.
+/// List windows; on sway / Hyprland enriched from the compositor IPC.
 pub fn windows(conn: &Conn) -> Result<Vec<WindowInfo>> {
     let toplevels = collect_toplevels(conn)?;
-    Ok(toplevels.iter().map(Toplevel::to_window_info).collect())
+    let mut infos: Vec<WindowInfo> = toplevels.iter().map(Toplevel::to_window_info).collect();
+    // Best effort: no IPC (niri, river, ...) or a slow compositor leaves the
+    // protocol-only answer.
+    if let Ok(snap) = crate::ipc::snapshot(false, crate::ax::IPC_DEADLINE) {
+        let outputs: Vec<String> = crate::screens::screens(conn)
+            .map(|s| s.into_iter().map(|s| s.id).collect())
+            .unwrap_or_default();
+        enrich(&mut infos, &toplevels, &snap, &outputs);
+    }
+    Ok(infos)
+}
+
+/// Fill geometry, output, pid, visibility and stacking of the toplevels that
+/// match an IPC client without ambiguity ([`crate::ipc::match_unique`]).
+/// `output` is set only when it names one of `outputs` (the `screens` ids).
+/// `stacking_order` becomes a back-to-front rank: matched windows by the
+/// compositor's layering, above every unmatched window (enumeration order).
+fn enrich(
+    infos: &mut [WindowInfo],
+    toplevels: &[Toplevel],
+    snap: &crate::ipc::Snapshot,
+    outputs: &[String],
+) {
+    let keys: Vec<(&str, &str)> = toplevels
+        .iter()
+        .map(|t| crate::ipc::key(t.app_id.as_deref(), t.title.as_deref()))
+        .collect();
+    let matches = crate::ipc::match_unique(&keys, &snap.clients);
+    for (info, m) in infos.iter_mut().zip(&matches) {
+        let Some(c) = m.map(|i| &snap.clients[i]) else {
+            continue;
+        };
+        if let Some(r) = c.rect {
+            info.geometry = r;
+        }
+        info.output = c.output.clone().filter(|o| outputs.contains(o));
+        info.pid = c.pid;
+        info.is_visible = Some(c.visible);
+    }
+    let mut order: Vec<usize> = (0..infos.len()).collect();
+    order.sort_by_key(|&i| match matches[i] {
+        Some(ci) => (1, snap.clients[ci].stack, toplevels[i].order as i64),
+        None => (0, 0, toplevels[i].order as i64),
+    });
+    for (rank, i) in order.into_iter().enumerate() {
+        infos[i].stacking_order = rank;
+    }
 }
 
 /// The frontmost (activated) app, or the first toplevel if none is activated.
@@ -438,6 +500,42 @@ mod tests {
         assert_eq!(w.geometry.width, 0);
         assert_eq!(w.geometry.height, 0);
         assert!(!w.exclude_from_capture);
+    }
+
+    #[test]
+    fn enrich_fills_matched_windows_only() {
+        let snap = crate::ipc::parse_sway(&crate::ipc::tests::sway_fixture());
+        let mut tls = vec![
+            Toplevel::for_test("1", "org.gnome.TextEditor", "Editor"),
+            Toplevel::for_test("2", "firefox", "Mail"),
+            Toplevel::for_test("3", "org.gnome.Calculator", "Calculator"),
+            Toplevel::for_test("4", "foot", "Term"),
+            Toplevel::for_test("5", "foot", "Term"),
+            Toplevel::for_test("6", "mpv", "Video"),
+        ];
+        for (i, t) in tls.iter_mut().enumerate() {
+            t.order = i;
+        }
+        let mut infos: Vec<WindowInfo> = tls.iter().map(Toplevel::to_window_info).collect();
+        let outputs = vec!["HEADLESS-1".to_owned(), "HEADLESS-3".to_owned()];
+        enrich(&mut infos, &tls, &snap, &outputs);
+        let g = |i: usize| infos[i].geometry;
+        assert_eq!(g(0), crate::ipc::tests::r(0, 0, 640, 800));
+        assert_eq!(infos[0].output.as_deref(), Some("HEADLESS-1"));
+        assert_eq!(infos[0].pid, Some(100));
+        assert_eq!(infos[1].is_visible, Some(false), "hidden tab");
+        // Ambiguous pair (two foot "Term" toplevels): untouched.
+        assert_eq!(g(3).width, 0);
+        assert_eq!(infos[3].output, None);
+        assert_eq!(infos[4].pid, None);
+        // mpv's output is not a known screen id -> null, geometry still set.
+        assert_eq!(infos[5].output, None);
+        assert_eq!(g(5).width, 1280);
+        // Stacking: unmatched lowest, then tiled < floating < fullscreen.
+        let so = |i: usize| infos[i].stacking_order;
+        assert!(so(3) < so(0) && so(4) < so(0));
+        assert!(so(0) < so(2), "floating above tiled");
+        assert!(so(2) < so(5), "fullscreen above floating");
     }
 
     #[test]

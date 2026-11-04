@@ -113,9 +113,9 @@ failure it prints a message to stderr and exits 1 (clap parse errors exit 2).
 |---|---|
 | `doctor` | Contract v1 report (always exit 0) + Wayland env and advertised globals |
 | `screens` | Enumerate outputs (wl_output + xdg-output) |
-| `windows` | Enumerate windows (foreign-toplevel) |
-| `screenshot [--display N]` | Capture a full monitor |
-| `zoom --display N --x --y --w --h` | Capture a region within a monitor |
+| `windows` | Enumerate windows (foreign-toplevel; geometry/output/visibility from sway or Hyprland IPC) |
+| `screenshot [--display N] [--keep-window ID]... [--mask-all]` | Capture a full monitor; mask mode paints all but the kept windows #1E1E1E (sway/Hyprland) |
+| `zoom --display N --x --y --w --h [--keep-window ID]... [--mask-all]` | Capture a region within a monitor (same mask mode) |
 | `pointer-move` / `-click` / `-scroll` / `-drag` | Pointer actions (virtual pointer) |
 | `left-mouse-down` / `left-mouse-up` | Press/release-and-hold the left button |
 | `key-sequence --keys <spec>` | Send a key combo, e.g. `ctrl+shift+tab` |

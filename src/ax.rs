@@ -22,9 +22,9 @@ use serde_json::{Value, json};
 use crate::conn::Conn;
 
 /// Per-read/write socket timeout.
-const IPC_TIMEOUT: Duration = Duration::from_millis(1500);
+pub(crate) const IPC_TIMEOUT: Duration = Duration::from_millis(1500);
 /// Overall budget for one IPC exchange, connect included.
-const IPC_DEADLINE: Duration = Duration::from_millis(1500);
+pub(crate) const IPC_DEADLINE: Duration = Duration::from_millis(1500);
 /// Largest accepted `set-text` payload on stdin.
 pub const MAX_STDIN_TEXT: usize = 16 << 20;
 
@@ -208,13 +208,13 @@ pub fn enrich(hint: &mut WindowHint, windows: &[IpcWindow], toplevel_dupes: usiz
 
 // -------------------------------------------------------------------- IPC
 
-fn sway_socket() -> Option<PathBuf> {
+pub(crate) fn sway_socket() -> Option<PathBuf> {
     std::env::var_os("SWAYSOCK")
         .filter(|s| !s.is_empty())
         .map(PathBuf::from)
 }
 
-fn hypr_socket() -> Option<PathBuf> {
+pub(crate) fn hypr_socket() -> Option<PathBuf> {
     let sig = std::env::var("HYPRLAND_INSTANCE_SIGNATURE")
         .ok()
         .filter(|s| !s.is_empty() && !s.contains('/'))?;
@@ -232,7 +232,7 @@ fn hypr_socket() -> Option<PathBuf> {
     candidates.into_iter().find(|p| p.exists())
 }
 
-fn connect(path: &Path) -> std::io::Result<UnixStream> {
+pub(crate) fn connect(path: &Path) -> std::io::Result<UnixStream> {
     let s = UnixStream::connect(path)?;
     s.set_read_timeout(Some(IPC_TIMEOUT))?;
     s.set_write_timeout(Some(IPC_TIMEOUT))?;
@@ -249,7 +249,7 @@ pub fn i3_frame(msg_type: u32, payload: &[u8]) -> Vec<u8> {
     m
 }
 
-fn sway_get_tree(path: &Path) -> Result<Value> {
+pub(crate) fn sway_get_tree(path: &Path) -> Result<Value> {
     const GET_TREE: u32 = 4;
     let mut s = connect(path).context("connect SWAYSOCK")?;
     s.write_all(&i3_frame(GET_TREE, b""))?;
@@ -290,7 +290,7 @@ fn ipc_exchange() -> Option<(IpcKind, Vec<IpcWindow>)> {
 
 /// Run `f` on a helper thread and give up after `limit` in total, so a wedged
 /// compositor can never hang the command. The helper is abandoned on timeout.
-fn with_deadline<T: Send + 'static>(
+pub(crate) fn with_deadline<T: Send + 'static>(
     limit: Duration,
     f: impl FnOnce() -> Option<T> + Send + 'static,
 ) -> Option<T> {

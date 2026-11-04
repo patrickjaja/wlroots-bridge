@@ -8,6 +8,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Window geometry on sway and Hyprland.** `windows` fills `geometry`,
+  `output`, `pid`, `is_visible` and `stacking_order` from the compositor IPC for
+  every window whose app id + title is unique; ambiguous windows stay empty.
+- **Mask mode.** `screenshot` / `zoom` take `--keep-window <id>` (repeatable)
+  and `--mask-all`: everything but the visible parts of the kept windows is
+  painted #1E1E1E, fail closed when a window cannot be located. Result key
+  `mask`; `doctor` reports `window_geometry`, `screenshot_mask` and
+  `screenshot_mask_gaps`.
+
 - **CLI contract v1.** `doctor` always exits 0 and reports the contract keys
   (`contract`, `bridge`, `version`, `backend`, `session_match`,
   `backend_reachable`, `backend_error`, `session_supported`, ...) with the old

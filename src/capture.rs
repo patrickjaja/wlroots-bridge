@@ -37,7 +37,8 @@ use wayland_protocols_wlr::screencopy::v1::client::{
 };
 
 use crate::conn::Conn;
-use crate::output::{ScreenshotCapture, ScreenshotResult};
+use crate::mask::{self, MaskReport, MaskRequest};
+use crate::output::{Rect, ScreenshotCapture, ScreenshotResult};
 use crate::screens::{self, OutputGeometry};
 use crate::transform::Transform;
 
@@ -413,14 +414,95 @@ fn capture_output_rgb(conn: &Conn, geom: &OutputGeometry) -> Result<(RgbImage, u
     Ok((rgb, w, h))
 }
 
+/// Budget for one compositor IPC snapshot in mask mode.
+const MASK_IPC_DEADLINE: Duration = Duration::from_millis(1500);
+
+/// Capture an output and apply `mask` (see `crate::mask`). `output` is the
+/// output's logical rect, the area the image shows.
+///
+/// Keep mode reads the IPC before and after the copy and accepts the frame
+/// only when both give the same kept regions (one retry), so a window that
+/// moved, opened or closed during the copy cannot leak through a stale plan.
+fn capture_masked(
+    conn: &Conn,
+    geom: &OutputGeometry,
+    output: &Rect,
+    mask: &MaskRequest,
+) -> Result<(RgbImage, Option<MaskReport>)> {
+    let ids = match mask {
+        MaskRequest::None => return Ok((capture_output_rgb(conn, geom)?.0, None)),
+        MaskRequest::All => {
+            let rgb = capture_output_rgb(conn, geom)?.0;
+            let report = MaskReport {
+                mode: "all",
+                kept: Vec::new(),
+                regions: Vec::new(),
+            };
+            return Ok((apply_keep_mask(&rgb, &[]), Some(report)));
+        }
+        MaskRequest::Keep(ids) => ids,
+    };
+    let toplevels = crate::wm::collect_toplevels(conn)?;
+    let read_plan = || -> Result<mask::Plan> {
+        let snap = crate::ipc::snapshot(true, MASK_IPC_DEADLINE)
+            .context("masked capture needs the compositor IPC (sway or Hyprland)")?;
+        mask::plan(&toplevels, ids, &snap)
+    };
+    for _ in 0..2 {
+        let before = read_plan()?;
+        let rgb = capture_output_rgb(conn, geom)?.0;
+        let after = read_plan()?;
+        if before != after {
+            continue;
+        }
+        let px = mask::to_pixels(&after.keep, output, rgb.width, rgb.height);
+        let report = MaskReport {
+            mode: "keep",
+            kept: after.kept,
+            regions: after.keep,
+        };
+        return Ok((apply_keep_mask(&rgb, &px), Some(report)));
+    }
+    bail!("windows changed while capturing (twice); masked capture refused")
+}
+
+/// A copy of `src` painted [`mask::MASK_RGB`] everywhere except `keep`.
+fn apply_keep_mask(src: &RgbImage, keep: &[mask::PixRect]) -> RgbImage {
+    let mut pixels: Vec<u8> = mask::MASK_RGB
+        .iter()
+        .copied()
+        .cycle()
+        .take(src.pixels.len())
+        .collect();
+    let w = src.width as usize;
+    for k in keep {
+        let (x0, x1) = (k.x0.min(src.width) as usize, k.x1.min(src.width) as usize);
+        let (y0, y1) = (k.y0.min(src.height) as usize, k.y1.min(src.height) as usize);
+        for y in y0..y1 {
+            let a = (y * w + x0) * 3;
+            let b = (y * w + x1) * 3;
+            pixels[a..b].copy_from_slice(&src.pixels[a..b]);
+        }
+    }
+    RgbImage {
+        width: src.width,
+        height: src.height,
+        pixels,
+    }
+}
+
 /// Capture a full monitor. `display` selects the monitor (default: primary).
-pub fn screenshot(conn: &Conn, display: Option<&str>) -> Result<ScreenshotResult> {
+pub fn screenshot(
+    conn: &Conn,
+    display: Option<&str>,
+    mask: &MaskRequest,
+) -> Result<ScreenshotResult> {
     let entries = screens::enumerate(conn)?;
     let entry = screens::resolve_output(&entries, display)?;
     let geom = OutputGeometry::from_entry(&entry);
     let screen = screens::to_screen(&geom, true);
 
-    let (rgb, _phys_w, _phys_h) = capture_output_rgb(conn, &geom)?;
+    let (rgb, report) = capture_masked(conn, &geom, &screen.geometry, mask)?;
     let target = compute_target_dims(rgb.width, rgb.height);
     let encoded = encode_resized_jpeg_base64(&rgb, target)?;
 
@@ -433,6 +515,7 @@ pub fn screenshot(conn: &Conn, display: Option<&str>) -> Result<ScreenshotResult
         display_id: screen.id,
         origin_x: screen.geometry.x,
         origin_y: screen.geometry.y,
+        mask: report,
     })
 }
 
@@ -445,6 +528,7 @@ pub fn zoom(
     y: i32,
     w: i32,
     h: i32,
+    mask: &MaskRequest,
 ) -> Result<ScreenshotCapture> {
     if w <= 0 || h <= 0 {
         bail!("zoom region must have positive width and height");
@@ -455,7 +539,8 @@ pub fn zoom(
     let geom = OutputGeometry::from_entry(&entry);
     let screen = screens::to_screen(&geom, true);
 
-    let (rgb, phys_w, phys_h) = capture_output_rgb(conn, &geom)?;
+    let (rgb, report) = capture_masked(conn, &geom, &screen.geometry, mask)?;
+    let (phys_w, phys_h) = (rgb.width, rgb.height);
 
     // The buffer is in physical pixels; the region is logical. Scale the crop by
     // the physical/logical ratio so a fractional-scaled output crops correctly.
@@ -471,7 +556,9 @@ pub fn zoom(
 
     let cropped = crop_rgb(&rgb, px, py, pw, ph)?;
     let target = compute_target_dims(cropped.width, cropped.height);
-    encode_resized_jpeg_base64(&cropped, target)
+    let mut out = encode_resized_jpeg_base64(&cropped, target)?;
+    out.mask = report;
+    Ok(out)
 }
 
 /// Convert a screencopy shm buffer to packed RGB.
@@ -619,6 +706,7 @@ fn encode_resized_jpeg_base64(rgb: &RgbImage, target: (u32, u32)) -> Result<Scre
         base64: base64::engine::general_purpose::STANDARD.encode(&jpeg),
         width: resized.width,
         height: resized.height,
+        mask: None,
     })
 }
 
@@ -794,6 +882,31 @@ mod tests {
         // (2,2) in source is (1,1) in the crop.
         let cidx = (2 + 1) * 3;
         assert_eq!(&c.pixels[cidx..cidx + 3], &[255, 255, 255]);
+    }
+
+    #[test]
+    fn keep_mask_paints_everything_else() {
+        let img = solid(4, 3, [200, 100, 50]);
+        let out = apply_keep_mask(
+            &img,
+            &[mask::PixRect {
+                x0: 1,
+                y0: 1,
+                x1: 3,
+                y1: 2,
+            }],
+        );
+        for y in 0..3u32 {
+            for x in 0..4u32 {
+                let i = ((y * 4 + x) * 3) as usize;
+                let kept = (1..3).contains(&x) && y == 1;
+                let want = if kept { [200, 100, 50] } else { mask::MASK_RGB };
+                assert_eq!(&out.pixels[i..i + 3], &want, "({x},{y})");
+            }
+        }
+        // Nothing kept: all mask color.
+        let all = apply_keep_mask(&img, &[]);
+        assert!(all.pixels.chunks(3).all(|p| p == mask::MASK_RGB));
     }
 
     #[test]

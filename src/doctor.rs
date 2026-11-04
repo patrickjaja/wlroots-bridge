@@ -6,7 +6,14 @@
 //! wlroots compositor (from `SWAYSOCK` / `HYPRLAND_INSTANCE_SIGNATURE` /
 //! `NIRI_SOCKET`) and the advertised globals we depend on are added as extras.
 
+use std::time::Duration;
+
 use crate::conn::{Conn, detect_compositor};
+
+/// Budget for the IPC probe behind `window_geometry` / `screenshot_mask`.
+const MASK_PROBE_BUDGET: Duration = Duration::from_millis(1500);
+/// The whole doctor stays under this (the launcher kills it at 5 s).
+const DOCTOR_BUDGET: Duration = Duration::from_millis(4700);
 use crate::output::{DoctorGlobals, DoctorReport};
 
 /// Build the report. Never fails: a connection error becomes `backend_error`.
@@ -35,8 +42,23 @@ pub fn doctor() -> DoctorReport {
         wayland_display: None,
         compositor: None,
         globals: None,
-        atspi: crate::ax::doctor_atspi(),
+        atspi: serde_json::Value::Null,
+        window_geometry: false,
+        screenshot_mask: false,
+        screenshot_mask_gaps: Vec::new(),
     };
+    // The mask probe (the full IPC read a masked capture needs) runs beside the
+    // accessibility doctor so the two together stay under the launcher's 5 s.
+    let started = std::time::Instant::now();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(crate::ipc::snapshot(true, MASK_PROBE_BUDGET).ok());
+    });
+    report.atspi = crate::ax::doctor_atspi();
+    let wait = DOCTOR_BUDGET
+        .saturating_sub(started.elapsed())
+        .clamp(Duration::from_millis(100), MASK_PROBE_BUDGET);
+    let snap = rx.recv_timeout(wait).ok().flatten();
 
     match connected {
         Err(error) => report.backend_error = Some(error),
@@ -61,6 +83,14 @@ pub fn doctor() -> DoctorReport {
                 wl_seat: g.seat.map(|b| b.version),
                 wl_shm: g.shm.map(|b| b.version),
             });
+            if let Some(snap) = &snap {
+                report.window_geometry =
+                    g.foreign_toplevel_wlr.is_some() || g.foreign_toplevel_ext.is_some();
+                report.screenshot_mask = report.window_geometry && g.screencopy.is_some();
+                if report.screenshot_mask {
+                    report.screenshot_mask_gaps = crate::ipc::mask_gaps(snap.kind).to_vec();
+                }
+            }
         }
     }
     report
