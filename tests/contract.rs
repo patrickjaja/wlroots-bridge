@@ -65,6 +65,13 @@ fn doctor_without_compositor_exits_zero_with_required_keys() {
     assert!(v["backend_error"].is_string());
     assert!(v["restore_token_path"].is_null());
     assert!(v["session_socket"].is_null());
+    // Contract v2 key: no sway / Hyprland in the scrubbed environment.
+    assert_eq!(
+        v["abortWatch"],
+        serde_json::json!({"mechanism": null, "available": false,
+            "reason": "no runtime binding API on this compositor",
+            "stale": false, "skippedKeyboards": [], "consumes": null})
+    );
 }
 
 #[test]

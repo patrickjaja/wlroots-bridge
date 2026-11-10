@@ -24,6 +24,9 @@ pub enum AxActionKind {
 pub enum Command {
     /// Report Wayland environment, detected compositor, and advertised globals.
     Doctor,
+    /// Long-running Escape watcher (optional contract addition): JSON lines on stdout,
+    /// `suspend` / `resume` on stdin. sway and Hyprland only.
+    AbortWatch,
     /// Enumerate screens (wl_output + xdg-output).
     Screens,
     /// Enumerate windows (foreign-toplevel).

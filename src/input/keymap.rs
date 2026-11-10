@@ -344,37 +344,239 @@ pub struct GeneratedKeymap {
     pub placements: Vec<KeyPlacement>,
 }
 
-/// XKB reserves keycodes 0..=8; real keys start at 9. We lay out ours from a
-/// fixed base so the first placement lands at a predictable code.
-const XKB_KEYCODE_BASE: u32 = 9;
-
-/// Build an XKB keymap text that binds the four modifier keys plus every keysym
-/// in `keysyms` to sequential keycodes.
+/// Where keys sit in a generated keymap.
 ///
-/// Layout (XKB keycode -> role):
-///   base+0 = Control_L, base+1 = Shift_L, base+2 = Alt_L, base+3 = Super_L,
-///   base+4.. = the requested keysyms (one per keycode; level 1 = the keysym,
-///   level 2 = the keysym again so Shift never changes it - we drive Shift as a
-///   real modifier when a keysym needs it).
+/// Compositors do not all match their own key bindings against the keymap a
+/// virtual keyboard uploads: Hyprland (seen on 0.56) resolves a virtual
+/// keyboard's key by its evdev code in the user's own layout. A key placed at
+/// an arbitrary code then triggers whatever the user's layout has there (with
+/// the old sequential layout, Control sat on evdev 1 = Escape, so every
+/// injected Ctrl fired Escape binds). So every keysym that has a position in
+/// the US pc105 layout goes to that position (Escape on evdev 1, Control_L 29,
+/// Shift_L 42, Alt_L 56, Super_L 125, letters, digits, punctuation, named
+/// keys); everything else goes to codes the US layout leaves unmapped, then to
+/// the alphanumeric block, then to the rest, never to xkb 9 (Escape) or a code
+/// that carries a modifier or lock in the US layout. Applications are not
+/// affected: they follow the uploaded keymap, where every placed code carries
+/// exactly the requested keysym.
+pub mod layout {
+    /// XKB keycodes of the four modifiers we drive (evdev = xkb - 8).
+    pub const CTRL: u32 = 37;
+    pub const SHIFT: u32 = 50;
+    pub const ALT: u32 = 64;
+    pub const SUPER: u32 = 133;
+    /// XKB keycode of Escape (evdev 1, KEY_ESC).
+    pub const ESCAPE: u32 = 9;
+    /// Highest keycode used (X11 clients via Xwayland cannot see more).
+    pub const MAX: u32 = 255;
+
+    /// US pc105 (evdev rules) positions: (xkb keycode, level 1, level 2 or 0),
+    /// from `xkbcli compile-keymap --rules evdev --model pc105 --layout us`.
+    pub const US: &[(u32, u32, u32)] = &[
+        (9, 0xff1b, 0),       // Escape
+        (10, 0x31, 0x21),     // 1 !
+        (11, 0x32, 0x40),     // 2 @
+        (12, 0x33, 0x23),     // 3 #
+        (13, 0x34, 0x24),     // 4 $
+        (14, 0x35, 0x25),     // 5 %
+        (15, 0x36, 0x5e),     // 6 ^
+        (16, 0x37, 0x26),     // 7 &
+        (17, 0x38, 0x2a),     // 8 *
+        (18, 0x39, 0x28),     // 9 (
+        (19, 0x30, 0x29),     // 0 )
+        (20, 0x2d, 0x5f),     // - _
+        (21, 0x3d, 0x2b),     // = +
+        (22, 0xff08, 0),      // BackSpace
+        (23, 0xff09, 0xfe20), // Tab ISO_Left_Tab
+        (24, 0x71, 0x51),     // q Q
+        (25, 0x77, 0x57),     // w W
+        (26, 0x65, 0x45),     // e E
+        (27, 0x72, 0x52),     // r R
+        (28, 0x74, 0x54),     // t T
+        (29, 0x79, 0x59),     // y Y
+        (30, 0x75, 0x55),     // u U
+        (31, 0x69, 0x49),     // i I
+        (32, 0x6f, 0x4f),     // o O
+        (33, 0x70, 0x50),     // p P
+        (34, 0x5b, 0x7b),     // [ {
+        (35, 0x5d, 0x7d),     // ] }
+        (36, 0xff0d, 0),      // Return
+        (37, 0xffe3, 0),      // Control_L
+        (38, 0x61, 0x41),     // a A
+        (39, 0x73, 0x53),     // s S
+        (40, 0x64, 0x44),     // d D
+        (41, 0x66, 0x46),     // f F
+        (42, 0x67, 0x47),     // g G
+        (43, 0x68, 0x48),     // h H
+        (44, 0x6a, 0x4a),     // j J
+        (45, 0x6b, 0x4b),     // k K
+        (46, 0x6c, 0x4c),     // l L
+        (47, 0x3b, 0x3a),     // ; :
+        (48, 0x27, 0x22),     // ' "
+        (49, 0x60, 0x7e),     // ` ~
+        (50, 0xffe1, 0),      // Shift_L
+        (51, 0x5c, 0x7c),     // \ |
+        (52, 0x7a, 0x5a),     // z Z
+        (53, 0x78, 0x58),     // x X
+        (54, 0x63, 0x43),     // c C
+        (55, 0x76, 0x56),     // v V
+        (56, 0x62, 0x42),     // b B
+        (57, 0x6e, 0x4e),     // n N
+        (58, 0x6d, 0x4d),     // m M
+        (59, 0x2c, 0x3c),     // , <
+        (60, 0x2e, 0x3e),     // . >
+        (61, 0x2f, 0x3f),     // / ?
+        (62, 0xffe2, 0),      // Shift_R
+        (64, 0xffe9, 0),      // Alt_L
+        (65, 0x20, 0),        // space
+        (66, 0xffe5, 0),      // Caps_Lock
+        (67, 0xffbe, 0),      // F1
+        (68, 0xffbf, 0),      // F2
+        (69, 0xffc0, 0),      // F3
+        (70, 0xffc1, 0),      // F4
+        (71, 0xffc2, 0),      // F5
+        (72, 0xffc3, 0),      // F6
+        (73, 0xffc4, 0),      // F7
+        (74, 0xffc5, 0),      // F8
+        (75, 0xffc6, 0),      // F9
+        (76, 0xffc7, 0),      // F10
+        (95, 0xffc8, 0),      // F11
+        (96, 0xffc9, 0),      // F12
+        (105, 0xffe4, 0),     // Control_R
+        (108, 0xffea, 0),     // Alt_R
+        (110, 0xff50, 0),     // Home
+        (111, 0xff52, 0),     // Up
+        (112, 0xff55, 0),     // Prior
+        (113, 0xff51, 0),     // Left
+        (114, 0xff53, 0),     // Right
+        (115, 0xff57, 0),     // End
+        (116, 0xff54, 0),     // Down
+        (117, 0xff56, 0),     // Next
+        (118, 0xff63, 0),     // Insert
+        (119, 0xffff, 0),     // Delete
+        (133, 0xffeb, 0),     // Super_L
+        (134, 0xffec, 0),     // Super_R
+    ];
+
+    /// Codes carrying a modifier or lock in the US layout (its modifier_map):
+    /// only ever used for exactly that keysym.
+    pub const US_MODIFIERS: &[u32] = &[
+        37, 50, 62, 64, 66, 77, 92, 105, 108, 133, 134, 203, 204, 205, 206,
+    ];
+
+    /// Codes (<= 255) the US layout leaves without any symbol.
+    pub const US_UNMAPPED: &[u32] = &[
+        97, 103, 120, 132, 149, 154, 168, 178, 183, 184, 219, 222, 230, 248,
+    ];
+
+    /// The US position of `keysym`: (code, at level 1).
+    pub fn standard(keysym: u32) -> Option<(u32, bool)> {
+        US.iter().find_map(|&(kc, l1, l2)| {
+            if l1 == keysym {
+                Some((kc, true))
+            } else if l2 != 0 && l2 == keysym {
+                Some((kc, false))
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Codes for keysyms without a free US position, best first.
+    pub fn spill() -> impl Iterator<Item = u32> {
+        US_UNMAPPED
+            .iter()
+            .copied()
+            .chain(10..=61)
+            .chain(62..=MAX)
+            .filter(|kc| *kc != ESCAPE && !US_MODIFIERS.contains(kc))
+    }
+}
+
+/// Whether a modifier token is Shift.
+pub fn is_shift(token: &str) -> bool {
+    modifier_keysym_name(token) == Some("Shift_L")
+}
+
+/// [`generate_keymap_with`] without real shift levels: every keysym sits at
+/// both levels of its key, so it arrives exactly as requested even with a
+/// stray Shift (`type`, and combos without Shift).
+#[cfg(test)]
+pub fn generate_keymap(keysyms: &[u32]) -> GeneratedKeymap {
+    generate_keymap_with(keysyms, false)
+}
+
+/// Build an XKB keymap text binding the four modifier keys plus every keysym
+/// in `keysyms` (see [`layout`] for where each one goes). A keysym requested
+/// twice gets the same keycode.
+///
+/// Shift levels: without `shift_levels` each requested keysym sits at both
+/// levels of its key (`[ a, a ]`), so it arrives exactly as requested even
+/// with Shift held. With `shift_levels` (a `key-sequence` / `hold-key` combo
+/// that holds Shift), a key placed at its US position carries the US pair
+/// (`[ a, A ]`, `[ 1, exclam ]`, `[ Tab, ISO_Left_Tab ]`), so Shift selects
+/// the shifted symbol as on a real keyboard (`shift+a` -> `A`); a requested
+/// keysym that IS the shifted symbol (`shift+A`) still arrives exactly.
+/// Spilled keys (no US position) keep both levels equal.
 ///
 /// The `key` request wants the evdev code (= XKB keycode - 8), so the returned
 /// placements carry `xkb_keycode - 8`.
-pub fn generate_keymap(keysyms: &[u32]) -> GeneratedKeymap {
-    // Modifier keycodes (XKB space).
-    let ctrl_kc = XKB_KEYCODE_BASE;
-    let shift_kc = XKB_KEYCODE_BASE + 1;
-    let alt_kc = XKB_KEYCODE_BASE + 2;
-    let super_kc = XKB_KEYCODE_BASE + 3;
-    let first_key_kc = XKB_KEYCODE_BASE + 4;
+pub fn generate_keymap_with(keysyms: &[u32], shift_levels: bool) -> GeneratedKeymap {
+    use std::collections::{BTreeMap, HashMap};
 
-    let max_kc = first_key_kc + keysyms.len() as u32; // one past the last used
+    // keycode -> keysym bound there.
+    let mut used: BTreeMap<u32, u32> = BTreeMap::new();
+    used.insert(layout::CTRL, xkeysym::key::Control_L);
+    used.insert(layout::SHIFT, xkeysym::key::Shift_L);
+    used.insert(layout::ALT, xkeysym::key::Alt_L);
+    used.insert(layout::SUPER, xkeysym::key::Super_L);
+    let mut code_of: HashMap<u32, u32> = used.iter().map(|(kc, ks)| (*ks, *kc)).collect();
 
-    // --- xkb_keycodes: declare <Kxx> aliases for every keycode we use. ---
+    // Pass 1: exact level-1 positions; pass 2: level-2 positions.
+    for level1 in [true, false] {
+        for &ks in keysyms {
+            if code_of.contains_key(&ks) {
+                continue;
+            }
+            if let Some((kc, l1)) = layout::standard(ks)
+                && l1 == level1
+                && !used.contains_key(&kc)
+            {
+                used.insert(kc, ks);
+                code_of.insert(ks, kc);
+            }
+        }
+    }
+    // Pass 3: everything else into the spill order (past 255 only if a
+    // caller ever asks for more keys than fit; `type` pages at 200).
+    let mut spill = layout::spill();
+    let mut overflow = layout::MAX + 1;
+    for &ks in keysyms {
+        if code_of.contains_key(&ks) {
+            continue;
+        }
+        let kc = loop {
+            match spill.next() {
+                Some(kc) if !used.contains_key(&kc) => break kc,
+                Some(_) => continue,
+                None => {
+                    overflow += 1;
+                    break overflow - 1;
+                }
+            }
+        };
+        used.insert(kc, ks);
+        code_of.insert(ks, kc);
+    }
+
+    let max_kc = used.keys().next_back().copied().unwrap_or(layout::SUPER);
+
+    // --- xkb_keycodes: declare <Kxx> for every keycode we use. ---
     let mut keycodes = String::new();
     keycodes.push_str("xkb_keycodes \"wlroots-bridge\" {\n");
-    keycodes.push_str(&format!("  minimum = {XKB_KEYCODE_BASE};\n"));
-    keycodes.push_str(&format!("  maximum = {};\n", max_kc.max(first_key_kc)));
-    for kc in XKB_KEYCODE_BASE..max_kc.max(first_key_kc) {
+    keycodes.push_str("  minimum = 8;\n");
+    keycodes.push_str(&format!("  maximum = {};\n", max_kc.max(layout::MAX)));
+    for kc in used.keys() {
         keycodes.push_str(&format!("  <K{kc}> = {kc};\n"));
     }
     keycodes.push_str("};\n");
@@ -385,45 +587,61 @@ pub fn generate_keymap(keysyms: &[u32]) -> GeneratedKeymap {
     // --- xkb_compat: stock rules so modifiers behave. ---
     let compat = "xkb_compat \"wlroots-bridge\" { include \"complete\" };\n";
 
-    // --- xkb_symbols: bind modifiers + each keysym, and the modifier_map. ---
+    // --- xkb_symbols: every placed key, and the modifier_map. ---
     let mut symbols = String::new();
     symbols.push_str("xkb_symbols \"wlroots-bridge\" {\n");
-    symbols.push_str(&format!("  key <K{ctrl_kc}> {{ [ Control_L ] }};\n"));
-    symbols.push_str(&format!("  key <K{shift_kc}> {{ [ Shift_L ] }};\n"));
-    symbols.push_str(&format!("  key <K{alt_kc}> {{ [ Alt_L ] }};\n"));
-    symbols.push_str(&format!("  key <K{super_kc}> {{ [ Super_L ] }};\n"));
-
-    let mut placements = Vec::with_capacity(keysyms.len());
-    for (i, &ks) in keysyms.iter().enumerate() {
-        let kc = first_key_kc + i as u32;
-        let sym = xkb_symbol_name(ks);
-        // Two identical levels: the same symbol whether or not Shift is held, so
-        // a stray Shift never corrupts the glyph. Shift is only driven for
-        // keysyms whose canonical placement is a shifted glyph (handled below by
-        // needs_shift heuristic), but here we bind the exact keysym at level 1.
-        symbols.push_str(&format!("  key <K{kc}> {{ [ {sym}, {sym} ] }};\n"));
-        placements.push(KeyPlacement {
-            evdev_code: kc - 8,
-            // We bind the exact keysym at level 1, so Shift is never needed to
-            // produce it. (For an uppercase 'A' we bind Aacute-style directly.)
-            needs_shift: false,
-        });
+    for (kc, ks) in &used {
+        let sym = xkb_symbol_name(*ks);
+        if [layout::CTRL, layout::SHIFT, layout::ALT, layout::SUPER].contains(kc) {
+            symbols.push_str(&format!("  key <K{kc}> {{ [ {sym} ] }};\n"));
+            continue;
+        }
+        // The US pair when this key sits at its own US position and has a
+        // shifted symbol there.
+        let pair = layout::US
+            .iter()
+            .find(|(c, l1, l2)| c == kc && *l2 != 0 && (*l1 == *ks || *l2 == *ks));
+        match pair {
+            Some(&(_, l1, l2)) if shift_levels => symbols.push_str(&format!(
+                "  key <K{kc}> {{ [ {}, {} ] }};\n",
+                xkb_symbol_name(l1),
+                xkb_symbol_name(l2)
+            )),
+            _ => symbols.push_str(&format!("  key <K{kc}> {{ [ {sym}, {sym} ] }};\n")),
+        }
     }
+    let placements = keysyms
+        .iter()
+        .map(|ks| KeyPlacement {
+            evdev_code: code_of[ks] - 8,
+            // The exact keysym is bound at level 1, so Shift is never needed.
+            needs_shift: false,
+        })
+        .collect();
 
-    symbols.push_str(&format!("  modifier_map Control {{ <K{ctrl_kc}> }};\n"));
-    symbols.push_str(&format!("  modifier_map Shift {{ <K{shift_kc}> }};\n"));
-    symbols.push_str(&format!("  modifier_map Mod1 {{ <K{alt_kc}> }};\n"));
-    symbols.push_str(&format!("  modifier_map Mod4 {{ <K{super_kc}> }};\n"));
+    symbols.push_str(&format!(
+        "  modifier_map Control {{ <K{}> }};\n",
+        layout::CTRL
+    ));
+    symbols.push_str(&format!(
+        "  modifier_map Shift {{ <K{}> }};\n",
+        layout::SHIFT
+    ));
+    symbols.push_str(&format!("  modifier_map Mod1 {{ <K{}> }};\n", layout::ALT));
+    symbols.push_str(&format!(
+        "  modifier_map Mod4 {{ <K{}> }};\n",
+        layout::SUPER
+    ));
     symbols.push_str("};\n");
 
     let text = format!("xkb_keymap {{\n{keycodes}{types}{compat}{symbols}}};\n");
 
     GeneratedKeymap {
         text,
-        ctrl_code: ctrl_kc - 8,
-        shift_code: shift_kc - 8,
-        alt_code: alt_kc - 8,
-        super_code: super_kc - 8,
+        ctrl_code: layout::CTRL - 8,
+        shift_code: layout::SHIFT - 8,
+        alt_code: layout::ALT - 8,
+        super_code: layout::SUPER - 8,
         placements,
     }
 }
@@ -637,14 +855,12 @@ mod tests {
         let closes = km.text.matches('}').count();
         assert_eq!(opens, closes, "unbalanced braces in keymap");
 
-        // One placement per requested keysym, codes strictly increasing.
+        // One placement per requested keysym, at their US positions.
         assert_eq!(km.placements.len(), 3);
-        assert!(km.placements[0].evdev_code < km.placements[1].evdev_code);
-        assert!(km.placements[1].evdev_code < km.placements[2].evdev_code);
-
-        // Modifier evdev codes distinct from key codes.
-        assert!(km.ctrl_code < km.placements[0].evdev_code);
-        assert!(km.shift_code < km.placements[0].evdev_code);
+        assert_eq!(km.placements[0].evdev_code, 35); // h = KEY_H
+        assert_eq!(km.placements[1].evdev_code, 23); // i = KEY_I
+        // No US position: the first unmapped code.
+        assert_eq!(km.placements[2].evdev_code, layout::US_UNMAPPED[0] - 8);
 
         // The CJK char is placed as a Unicode symbol.
         assert!(km.text.contains("U597D")); // 好 = U+597D
@@ -655,14 +871,116 @@ mod tests {
 
     #[test]
     fn generated_keymap_handles_repeated_chars() {
-        // Repeated chars each get their own keycode (we don't dedupe); the
-        // keymap must still be well-formed and one placement per input.
+        // A repeated keysym reuses its keycode; one placement per input.
         let syms: Vec<u32> = "aaa".chars().map(|c| keysym_for_char(c).unwrap()).collect();
         let km = generate_keymap(&syms);
         assert_eq!(km.placements.len(), 3);
+        assert!(km.placements.iter().all(|p| p.evdev_code == 30));
         let opens = km.text.matches('{').count();
         let closes = km.text.matches('}').count();
         assert_eq!(opens, closes);
+    }
+
+    /// Hyprland matches a virtual keyboard's keys by evdev code in the user's
+    /// layout: Escape and the modifiers must sit at their real codes, and no
+    /// other key may ever take evdev 1 (KEY_ESC) or a modifier code.
+    #[test]
+    fn standard_evdev_codes() {
+        let esc = keysym_for_name("Escape").unwrap();
+        let km = generate_keymap(&[esc]);
+        assert_eq!(km.placements[0].evdev_code, 1); // KEY_ESC
+        assert_eq!(km.ctrl_code, 29); // KEY_LEFTCTRL
+        assert_eq!(km.shift_code, 42); // KEY_LEFTSHIFT
+        assert_eq!(km.alt_code, 56); // KEY_LEFTALT
+        assert_eq!(km.super_code, 125); // KEY_LEFTMETA
+
+        // ctrl+a: Control on 29, `a` on 30 (KEY_A), nothing on 1.
+        let km = generate_keymap(&[keysym_for_char('a').unwrap()]);
+        assert_eq!(km.placements[0].evdev_code, 30);
+        assert!(
+            !km.text.contains("<K9>"),
+            "nothing may sit on xkb 9 (Escape)"
+        );
+
+        // Named keys at their KEY_* codes.
+        for (name, evdev) in [
+            ("Return", 28),
+            ("Tab", 15),
+            ("BackSpace", 14),
+            ("space", 57),
+            ("Delete", 111),
+            ("Left", 105),
+            ("F5", 63),
+            ("F12", 88),
+        ] {
+            let km = generate_keymap(&[keysym_for_name(name).unwrap()]);
+            assert_eq!(km.placements[0].evdev_code, evdev, "{name}");
+        }
+
+        // A modifier keysym as a base key uses the modifier's own key.
+        let km = generate_keymap(&[xkeysym::key::Shift_L]);
+        assert_eq!(km.placements[0].evdev_code, km.shift_code);
+    }
+
+    #[test]
+    fn shift_levels_only_on_request() {
+        let a = keysym_for_char('a').unwrap();
+        let one = keysym_for_char('1').unwrap();
+        let tab = keysym_for_name("Tab").unwrap();
+        let e = keysym_for_char('é').unwrap();
+        // Default (`type`, combos without Shift): exact glyph on both levels.
+        let km = generate_keymap(&[a, one, e]);
+        assert!(km.text.contains("key <K38> { [ a, a ] };"), "{}", km.text);
+        assert!(km.text.contains("key <K10> { [ 1, 1 ] };"));
+        // With Shift in the combo: the US pairs.
+        let km = generate_keymap_with(&[a], true);
+        assert!(km.text.contains("key <K38> { [ a, A ] };"), "{}", km.text);
+        let km = generate_keymap_with(&[one], true);
+        assert!(km.text.contains("key <K10> { [ 1, exclam ] };"));
+        let km = generate_keymap_with(&[tab], true);
+        assert!(km.text.contains("key <K23> { [ Tab, ISO_Left_Tab ] };"));
+        // Requesting the shifted glyph itself: same key, still the pair.
+        let km = generate_keymap_with(&[keysym_for_char('A').unwrap()], true);
+        assert!(km.text.contains("key <K38> { [ a, A ] };"));
+        // Spilled keys keep both levels equal.
+        let km = generate_keymap_with(&[e], true);
+        assert!(
+            km.text.contains("key <K97> { [ eacute, eacute ] };"),
+            "{}",
+            km.text
+        );
+        // Keys without a shifted symbol (Return, F5) are unchanged.
+        let km = generate_keymap_with(&[keysym_for_name("Return").unwrap()], true);
+        assert!(km.text.contains("key <K36> { [ Return, Return ] };"));
+    }
+
+    #[test]
+    fn many_distinct_keys_avoid_escape_and_modifier_codes() {
+        // 200 distinct glyphs (the `type` page size): Latin, shifted, CJK.
+        let mut syms: Vec<u32> = (0x21u32..0x7f).collect(); // printable ASCII
+        syms.extend(
+            (0x4e00u32..)
+                .take(200 - syms.len())
+                .map(|cp| 0x0100_0000 | cp),
+        );
+        assert_eq!(syms.len(), 200);
+        let km = generate_keymap(&syms);
+        let codes: Vec<u32> = km.placements.iter().map(|p| p.evdev_code + 8).collect();
+        let mut uniq = codes.clone();
+        uniq.sort();
+        uniq.dedup();
+        assert_eq!(uniq.len(), 200, "one keycode per distinct keysym");
+        assert!(
+            codes.iter().all(|kc| *kc <= layout::MAX),
+            "fits X11 keycodes"
+        );
+        assert!(!codes.contains(&layout::ESCAPE));
+        for m in layout::US_MODIFIERS {
+            assert!(!codes.contains(m), "keycode {m} carries a modifier");
+        }
+        // Lowercase letters keep their US codes; their uppercase twins spill.
+        assert_eq!(km.placements[(b'a' - 0x21) as usize].evdev_code, 30);
+        assert_ne!(km.placements[(b'A' - 0x21) as usize].evdev_code, 30);
     }
 
     #[test]

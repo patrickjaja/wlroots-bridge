@@ -126,6 +126,7 @@ failure it prints a message to stderr and exits 1 (clap parse errors exit 2).
 | `cursor-position` | Unsupported on Wayland (exits 1) |
 | `activate-window --window <id>` | Raise + focus a window (wlr foreign-toplevel; works on Sway/Hyprland/Niri) |
 | `session-start` / `session-end` / `forget-session` | No-ops (`session-start` -> `{"ok":true,"session":"noop"}`; the others report `ended:false, daemon:"none"`) |
+| `abort-watch` | Long-running Escape watcher (optional contract addition, sway and Hyprland): JSON lines on stdout, `suspend` / `resume` on stdin |
 
 ```sh
 wlroots-bridge doctor
@@ -151,6 +152,51 @@ The CLI follows the Computer Use bridge CLI contract v1 of claude-desktop-extra:
 `session-end` and `forget-session` report `ended:false, daemon:"none"` (this
 bridge has no session daemon or grant), and every coordinate flag accepts
 negative values.
+
+## Escape abort (`abort-watch`, optional contract addition)
+
+`abort-watch` tells Claude Desktop when the user presses Escape on a physical
+keyboard, so a running Computer Use turn stops. It is the one long-running
+subcommand; the wire protocol (`ready` / `abort` / `ack` / `error` lines,
+`suspend` / `resume`, exit codes, parent-death cleanup) comes from the shared
+[cu-abort-watch](https://github.com/patrickjaja/cu-abort-watch) crate.
+
+| Compositor | Mechanism | Escape still reaches the app? | `syntheticSafe` |
+|---|---|---|---|
+| sway (and sway-IPC forks) | `bindsym --input-device=<keyboard> --no-repeat --inhibited Escape nop claude-cu-abort` per physical keyboard, `binding` event | **No**: sway has no non-consuming `bindsym`, so while armed Escape is taken from applications | true |
+| Hyprland, Lua config (0.55+) | `hl.bind("EsCaPe", hl.dsp.event(..), {non_consuming, dont_inhibit, device = {..}})` over `eval`, `custom>>claude-cu-abort` on socket2 | Yes (non-consuming) | true |
+| Hyprland, hyprlang 0.55/0.56 | `keyword bindnpkd` (non-consuming, per-device) | Yes | true |
+| Hyprland, hyprlang up to 0.54 | `keyword bindnpd` (non-consuming, global; `suspend` unbinds it) | Yes | false |
+| niri, river, labwc, ... | none: `error` event "no runtime binding API on <compositor>", exit 2 | - | - |
+
+The bridge's own virtual keyboard is never bound, so an Escape the model types
+does not abort. On Hyprland with a Lua config, arming and disarming go through
+`hyprctl eval`, which clears the config-error list Hyprland shows (unavoidable:
+it is the only runtime bind API there; the errors return on the next config
+reload). A bind someone removes at run time is noticed within 2 s and bound
+again. When the user already binds a bare Escape (sway: in the
+`default` mode of the config; Hyprland: outside submaps), `abort-watch` refuses
+to arm and leaves that binding alone. Any compositor reply that is not exactly
+the documented success undoes what was done and exits 2 (unverified means not
+armed).
+
+Binds are shared by every Claude profile of ONE compositor instance under
+`$XDG_RUNTIME_DIR/claude-cu-esc/<sway|hyprland>/<instance>/`: the first watcher
+binds, the last one unbinds, and binds left by a killed watcher are cleared by
+the next one. To clear them without arming, run `abort-watch` with stdin
+already at EOF (`wlroots-bridge abort-watch </dev/null`: arms, cleans up,
+exits 0).
+
+`doctor` reports `abortWatch: {mechanism, available, reason, stale,
+skippedKeyboards, consumes}`: `stale` = a crashed watcher left binds,
+`skippedKeyboards` = physical keyboards that cannot be bound right now,
+`consumes` = whether arming takes Escape from applications (`true` on sway,
+`false` on Hyprland 0.55+, `null` when unknown).
+Details and limits: [DESIGN.md](DESIGN.md#abort-watch-contract-v2).
+
+Tests: `tests/abort_mock.rs` (mock sway and Hyprland sockets, no compositor)
+and `tests/abort_sway.rs` (real nested headless sway; skipped without `sway`,
+fails instead with `WLROOTS_BRIDGE_REQUIRE_SWAY=1`, as in CI).
 
 ## Bundling into claude-desktop-extra
 

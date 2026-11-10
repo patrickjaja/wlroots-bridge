@@ -232,6 +232,9 @@ pub struct DoctorReport {
     /// Additive: what a masked capture cannot see and so leaves unmasked when
     /// drawn over a kept window (empty when `screenshot_mask` is false).
     pub screenshot_mask_gaps: Vec<&'static str>,
+    /// Additive (optional contract addition): whether `abort-watch` would arm here.
+    #[serde(rename = "abortWatch")]
+    pub abort_watch: serde_json::Value,
 }
 
 /// Presence + bound version of each global we depend on. `Some(v)` = advertised

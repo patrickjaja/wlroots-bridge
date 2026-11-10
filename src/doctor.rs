@@ -46,6 +46,7 @@ pub fn doctor() -> DoctorReport {
         window_geometry: false,
         screenshot_mask: false,
         screenshot_mask_gaps: Vec::new(),
+        abort_watch: serde_json::Value::Null,
     };
     // The mask probe (the full IPC read a masked capture needs) runs beside the
     // accessibility doctor so the two together stay under the launcher's 5 s.
@@ -54,11 +55,17 @@ pub fn doctor() -> DoctorReport {
     std::thread::spawn(move || {
         let _ = tx.send(crate::ipc::snapshot(true, MASK_PROBE_BUDGET).ok());
     });
+    // The abort-watch probe (short IPC requests, bounded at 1.5 s) runs
+    // beside the other two.
+    let abort_probe = std::thread::spawn(crate::abort::doctor);
     report.atspi = crate::ax::doctor_atspi();
     let wait = DOCTOR_BUDGET
         .saturating_sub(started.elapsed())
         .clamp(Duration::from_millis(100), MASK_PROBE_BUDGET);
     let snap = rx.recv_timeout(wait).ok().flatten();
+    report.abort_watch = abort_probe.join().unwrap_or_else(|_| {
+        cu_abort_watch::AbortWatchDoctor::unavailable(None, "abort-watch probe panicked").to_value()
+    });
 
     match connected {
         Err(error) => report.backend_error = Some(error),

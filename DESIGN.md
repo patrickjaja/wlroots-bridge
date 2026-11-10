@@ -62,7 +62,8 @@ snake_case.
 
 | Subcommand | Output shape | JS reader (evidence) |
 |---|---|---|
-| `doctor` | contract v1 keys (see below) plus, when the compositor is reachable, `{wayland_display, compositor, globals:{virtual_pointer, virtual_keyboard, screencopy, foreign_toplevel_wlr, foreign_toplevel_ext, xdg_output, wl_output_count, wl_seat, wl_shm}}` | always exit 0 |
+| `doctor` | contract v1 keys (see below) plus, when the compositor is reachable, `{wayland_display, compositor, globals:{virtual_pointer, virtual_keyboard, screencopy, foreign_toplevel_wlr, foreign_toplevel_ext, xdg_output, wl_output_count, wl_seat, wl_shm}}`, and always `abortWatch:{mechanism, available, reason}` | always exit 0 |
+| `abort-watch` | long-running, JSON lines (see "abort-watch") | optional addition |
 | `screens` | `[{id, name, geometry:{x,y,width,height}, scale, refresh_millihz, is_active, is_primary}]` | `mapRustScreenToDisplay` reads `geometry.*`, `scale`, `is_primary`, `name`, `id` (-> `_bridgeId`) |
 | `screenshot [--display N] [--keep-window ID]... [--mask-all]` | `{base64, width, height, displayWidth, displayHeight, displayId, originX, originY, mask?}` (camelCase) | `screenshotResultFromRust` reads `result.displayWidth`/`displayHeight`/`originX`/`originY` |
 | `zoom --x --y --w --h [--display N] [--keep-window ID]... [--mask-all]` | `{base64, width, height, mask?}` | `zoom` reads `result.base64`/`width`/`height` |
@@ -136,11 +137,38 @@ libxkbcommon (which would break the pure-Rust static build), we **generate the
 XKB keymap text ourselves** (the wtype technique, hand-rolled in
 `src/input/keymap.rs::generate_keymap`):
 
-- We lay out sequential XKB keycodes: four fixed modifier keys (Control, Shift,
-  Alt, Super with proper `modifier_map` entries), then one keycode per requested
-  keysym.
-- Each requested keysym is bound at **both** shift levels of its keycode to the
-  exact glyph, so a stray Shift never corrupts it. Modifiers are sent both
+- Keys sit at their US pc105 positions where the keysym has one: Escape on
+  evdev 1 (KEY_ESC), Control_L 29, Shift_L 42, Alt_L 56, Super_L 125 (with
+  `modifier_map` entries), letters, digits, punctuation (an uppercase or
+  shifted glyph takes its key's code when the lowercase one is not in the
+  same keymap), Return, Tab, BackSpace, space, F1-F12, arrows, Home/End,
+  Prior/Next, Insert, Delete. Everything else goes to codes the US layout
+  leaves unmapped, then to the alphanumeric block, then to the rest, never to
+  xkb 9 or a code that carries a modifier or lock in the US layout, and never
+  above 255 (X11 clients). A keysym requested twice reuses its code.
+- Why: Hyprland (seen on 0.56.2) matches a virtual keyboard's keys against
+  its key BINDINGS by evdev code in the user's own layout, not by the keymap
+  the client uploaded. The previous sequential layout put Control_L on evdev
+  1, so every Ctrl the bridge injected fired the user's Escape binds (and
+  would have aborted Computer Use on the global-bind fallback); single keys
+  sat on evdev 5 (`4`). Applications are not affected either way: they read
+  the uploaded keymap, where every placed code carries exactly the requested
+  keysym (checked with `xkbcli-interactive-wayland` in
+  `tests/abort_sway.rs`). On non-US user layouts Hyprland may still see a
+  different symbol for letters and punctuation (e.g. QWERTZ y/z); Escape,
+  the modifiers and the named keys are layout-independent.
+- Shift levels. `type` and combos without Shift: each requested keysym is
+  bound at **both** shift levels of its keycode to the exact glyph, so a
+  stray Shift never corrupts it (`type 'aB'` gives `a`, `B`). A
+  `key-sequence` / `hold-key` combo that holds Shift: a key at its US
+  position carries the US pair (`[ a, A ]`, `[ 1, exclam ]`,
+  `[ Tab, ISO_Left_Tab ]`), so Shift selects the shifted symbol as on a real
+  keyboard: `shift+a` gives `A`, `shift+1` gives `!`, `ctrl+shift+a` gives
+  `A` with Control (^A), `shift+tab` gives `ISO_Left_Tab` (what toolkits and
+  terminals expect for back-tab). Requesting the shifted glyph itself
+  (`shift+A`) still gives `A`; keys without a US position (`é`, CJK) keep both
+  levels equal. Until this change Shift never changed the symbol
+  (`shift+a` gave `a`). Modifiers are sent both
   ways: as key events on their real keycodes, and, after every modifier press
   or release, as `modifiers()` with the depressed real-mod mask (Shift `0x1`,
   Control `0x4`, Mod1 `0x8`, Mod4 `0x40`, matching the generated
@@ -328,6 +356,11 @@ The bridge implements the Computer Use bridge CLI contract v1
   `{"ok":true,"ended":false,"daemon":"none"}`; `forget-session` ->
   `{"ok":true,"ended":false,"daemon":"none","token_removed":false,"token_path":null}`.
   There is no daemon and no grant, so none of them has side effects.
+- Additive `doctor` key `abortWatch` (optional contract addition): `{mechanism:"sway"|"hyprland"|null,
+  available, reason, stale, skippedKeyboards, consumes}`. Short read-only IPC
+  requests only (no subscription, no `eval`), bounded at 1.5 s; unavailable
+  with a reason when the user binds a bare Escape or the compositor has no
+  runtime binding API.
 - Additive `doctor` keys: `window_geometry` (sway/Hyprland IPC answered and a
   foreign-toplevel protocol is advertised), `screenshot_mask` (`window_geometry`,
   the full mask IPC read succeeded and screencopy is advertised) and
@@ -335,6 +368,223 @@ The bridge implements the Computer Use bridge CLI contract v1
 - Every coordinate flag accepts negative values (layouts can start left of or
   above the origin).
 - `tests/contract.rs` runs these checks against the binary without a compositor.
+
+## abort-watch (optional contract addition)
+
+Long-running Escape watcher. The protocol half (stdout `ready` / `abort` /
+`ack` / `error` lines, stdin `suspend` / `resume`, signals, parent death, exit
+codes 0 / 1 / 2, `SharedBinding`) is the `cu-abort-watch` crate; `src/abort/`
+is the compositor half. The backend follows the HOST compositor:
+`SWAYSOCK` that accepts a connection -> sway, else `HYPRLAND_INSTANCE_SIGNATURE`
+-> Hyprland, else an `error` event and exit 2 (nothing created): "no runtime
+binding API on <niri | first XDG_CURRENT_DESKTOP entry | this compositor>", or
+"SWAYSOCK is set but sway does not answer".
+
+Rule for every step: a compositor reply that is not exactly the documented
+success (sway `success: true` per command, Hyprland `ok`, a bind that then
+shows up in `j/binds`, a known `j/status` shape) undoes what was done and
+exits 2. Unverified means not armed.
+
+Escape and applications: sway has no non-consuming `bindsym`, so while armed
+a physical Escape is consumed by sway and the focused app does not get it.
+Hyprland binds are non-consuming: Escape aborts AND reaches the app.
+`doctor.abortWatch.consumes` reports this (`true` sway, `false` Hyprland
+0.55+, `null` when the version cannot be told).
+
+### sway (`src/abort/sway.rs`)
+
+- Physical keyboard = `GET_INPUTS` entry with `type: keyboard` that is not an
+  injector: name `wlr_virtual_keyboard_v1` (every `zwp_virtual_keyboard_v1`
+  client, this bridge included; identifier `0:0:wlr_virtual_keyboard_v1`),
+  `virtual keyboard` (older wlroots), or a name containing `ydotool`.
+  Remappers that carry the user's keys through uinput (keyd, kanata) count as
+  physical.
+- Bind, one per keyboard, batched with `; `:
+  `mode default bindsym --input-device=<id> --no-repeat --inhibited Escape nop claude-cu-abort`.
+  Unbind: `mode default unbindsym --input-device=<id> --no-repeat --inhibited Escape`.
+  The `mode default` prefix puts the bind into the default mode from any mode
+  without a `mode` event. Fallbacks, learned on the first bind and kept in the
+  record: without `--no-repeat` when sway rejects it (repeat is then
+  debounced), without the prefix when sway rejects it AND the current mode is
+  `default` (otherwise arming fails).
+- Identifiers with characters sway's command parser treats specially (`;` `,`
+  `'` `$` braces `#` ...): `bindsym "--input-device=<id>" ...` without the
+  prefix (sway 1.12 keeps quotes literally inside `mode default ...`), so
+  only while sway is in the default mode; otherwise on the next `mode` event
+  to `default`. Identifiers with `"` or `\` are never bound (sway keeps
+  backslash escapes literally inside quotes, tested on 1.12): logged, listed
+  in `doctor.abortWatch.skippedKeyboards`, and arming fails when no physical
+  keyboard can be bound.
+- Events (`SUBSCRIBE ["binding","input","mode","workspace","shutdown"]`, made
+  before binding): `binding` with command `nop claude-cu-abort` -> abort;
+  `input` `added` physical keyboard -> bound (once across holders); `mode`
+  `default` -> keyboards still missing are bound; `workspace` `reload` -> the
+  user-binding check runs again, then everything is re-bound (an identical
+  `bindsym` overwrites, so every holder doing it is harmless); a reload that
+  brings a user Escape binding empties the record (sway already dropped our
+  binds) and ends the watcher (error, exit 1); `shutdown` or a closed socket
+  -> error, exit 1.
+- Mode quirk (sway 1.12, measured): an Escape in a mode whose Escape binding
+  switches to `default` (the stock `resize` mode) produces: mode change ->
+  binding run of the user's binding -> binding run of ours (sway evaluates the
+  same press again in `default`). A binding event of ours within 100 ms after
+  a mode change or another Escape binding run is dropped, so leaving `resize`
+  with Escape does not abort.
+- User binding check: sway has no request that lists bindings. `GET_CONFIG`
+  returns the main config text (includes not expanded); `src/abort/swayconf.rs`
+  re-reads it like sway: `\` continuations, `#` comments, `{ }` blocks,
+  `set $var`, `include` (sway variables, `~`, `$ENV` of the sway process from
+  `/proc/<pid>/environ` via `SO_PEERCRED`, `*`/`?` globs, relative to the
+  including file; regular files only, so a FIFO cannot hang arming; the whole
+  read has a 2 s deadline). A `bindsym` of a bare `Escape` (or `0xff1b`) /
+  `bindcode 9` that lands in the `default` mode and is not removed by a later
+  `unbindsym`/`unbindcode` blocks arming. Not seen: bindings added at runtime
+  with `swaymsg bindsym`, and include files this process cannot read
+  (logged).
+- A user binding with OUR signature (`--input-device=<id> --inhibited
+  Escape`; sway's `binding_key_compare` ignores `--no-repeat`) would be
+  removed by our unbind. Every unbind (last holder, stale cleanup) skips such
+  ids. The first holder clears stale binds BEFORE refusing for a user
+  binding, because a stale device bind would shadow the user's own Escape.
+
+### Hyprland (`src/abort/hypr.rs`)
+
+All Hyprland strings live in `hypr::cmd`.
+
+- Dialect: `j/status` (read-only; an `eval` probe would clear the user's
+  config error list: `eval` runs `m_errors.clear()`).
+- With a Lua config, arming and disarming (and every re-bind) go through
+  `eval`, which clears the config-error list Hyprland shows the user
+  (verified on 0.56.2). There is no other runtime bind API in Lua mode, so
+  this is unavoidable: a config error the user has not fixed yet disappears
+  from the error bar when Computer Use starts or stops (it comes back on the
+  next config reload). hyprlang (`keyword`) does not do this. `configProvider: lua`
+  -> Lua; `hyprlang` -> hyprlang 0.55/0.56; the exact reply `unknown request`
+  -> hyprlang 0.54 or older; anything else -> not armed. Note that every Lua
+  bind/unbind `eval` still clears that error list (unavoidable: `eval` is the
+  only runtime bind API in Lua mode).
+- Physical keyboard = `j/devices` `keyboards[].name` not starting with
+  `hl-virtual-keyboard` (Hyprland's name for every virtual keyboard, plus
+  `-<process>` with `misc:name_vk_after_proc` and `-N` for duplicates) or
+  `virtual-keyboard`, and not containing `ydotool`.
+- Lua bind (option keys of `hlBind` identical at v0.55.0, v0.56.0, v0.57.2):
+  `eval local t = __claude_cu_abort or {}` / `__claude_cu_abort = t` /
+  `t[#t + 1] = hl.bind("EsCaPe", hl.dsp.event("claude-cu-abort"), { non_consuming = true, dont_inhibit = true, description = "claude-cu-abort", device = { inclusive = true, list = { "<kbd>", ... } } })`.
+  Unbind: `eval for _, b in ipairs(__claude_cu_abort or {}) do if tostring(b) ~= "HL.Keybind(expired)" then pcall(function() b:remove() end) end end` / `__claude_cu_abort = nil`.
+  The `tostring` guard is load-bearing: when something else removed our bind
+  (a user's `hl.unbind("escape")` lower-cases and so removes ours too, or a
+  config tool), the stored object is expired, and on 0.55/0.56 `remove()` on
+  an expired object dereferences null (`getKeybindFromUserdata` returns an
+  always-set optional): Hyprland crashes with SIGSEGV (reproduced on 0.56.2),
+  and `pcall` cannot catch that. `__tostring` is null-safe in 0.55, 0.56 and
+  0.57, so it is the only method ever called on a stored object before
+  `remove()`; every Lua removal (disarm, stale cleanup, heal, device re-sync,
+  re-bind after a run-time removal) goes through this one string.
+  On 0.55/0.56 `remove()` erases every bind with the same key STRING and
+  mods (0.57 removes only the object), hence the `EsCaPe` spelling: the
+  user's `escape` binds in submaps are never hit. `hl.unbind(...)` is never
+  used (it normalizes case).
+- hyprlang bind (single-character flags in any order; `n` non-consuming, `p`
+  bypass inhibitors, `k` per-device (0.55+), `d` description):
+  `keyword bindnpkd , EsCaPe, <kbd> <kbd>, claude-cu-abort, event, claude-cu-abort`;
+  on `bind: invalid flag` (no `k`, 0.54 and older):
+  `keyword bindnpd , EsCaPe, claude-cu-abort, event, claude-cu-abort`, then
+  `keyword bindnd , ...` if `p` is unknown too (global, `syntheticSafe:
+  false`). Unbind: `keyword unbind , EsCaPe` (exact key string: ours only).
+- Confirmation: after the first bind the bind must appear in `j/binds`
+  (description / `event` arg `claude-cu-abort`), else undo and exit 2.
+- socket2: `custom>>claude-cu-abort` -> abort; `configreloaded>>` -> when our
+  bind is gone from `j/binds`, re-check user binds, then re-bind (not while
+  any holder suspends the global bind). No hot-plug event exists, and nothing
+  reports a bind removed at run time (a user's `hl.unbind("escape")`,
+  `keyword unbind`, a config tool), so every 2 s (by elapsed time: steady
+  socket2 traffic does not starve it) `j/devices` and `j/binds` are re-read:
+  when the keyboard list changed or our bind is missing, the guarded unbind
+  runs (clearing the Lua table) and the bind is made again.
+- Messages name a conflicting user bind by its `description` when it has one
+  (every Lua bind reports its dispatcher as `__lua <ref>`).
+- `suspend` / `resume` act only on the global bind and are counted across
+  holders in `<instance>-suspended`: the first suspender unbinds, the last
+  resumer binds again. A watcher that exits while suspended resumes first.
+- User binding check: `j/binds` (live): a bind that is not ours, modmask 0,
+  key `escape` (any case) or keycode 9, in the global submap or
+  `submap_universal`; plus, from the plain-text `binds` (only 0.57+ prints
+  `flags:`), an Escape bind with `ignore_mods` at any modmask. Before 0.57
+  `ignore_mods` is not visible.
+
+### Shared binds
+
+One holder set per compositor INSTANCE:
+`$XDG_RUNTIME_DIR/claude-cu-esc/sway/i<fnv64 of the canonical SWAYSOCK path>/`
+and `.../hyprland/<instance signature>/` (hashed when it is not a plain file
+name), created through `SharedBinding::for_mechanism` (checks `claude-cu-esc`
+and `<mechanism>`) and `SharedBinding::in_dir` (checks the instance dir). Two
+sways (second VT, nested) or two Hyprlands of one user never share holders.
+
+Used through `lock()`: the first holder clears stale binds when `pruned() > 0`
+or a record exists, checks the user's bindings, writes the record (intent),
+registers, then binds (on failure: undone, unregistered). The record
+`bound.json` holds the spelling variant and the bound devices; the last
+holder's `release` unbinds from it and deletes it (keeps it, listing what is
+left, when a quoted sway identifier could not be unbound outside the default
+mode). Event-thread actions (hot-plug, reload, poll, mode) take the lock and
+do nothing once this holder is no longer registered. Every IPC request has a
+1.5 s timeout; the event subscription blocks without a timeout and is shut
+down by `disarm`.
+
+Heal: `abort-watch` with stdin already at EOF arms (as first holder when the
+others are dead: stale binds and record cleared), then disarms and exits 0.
+`doctor.abortWatch.stale` is true when the instance directory has a record or
+holder files but no live holder (read-only check: taking the lock would prune
+the holder files the next first holder needs; a reused pid counts as live).
+
+Presses within 1 s of the previous event are one press (debounce), covering
+key repeat without `--no-repeat` and duplicate binds left by a crash.
+
+### To verify on a real Hyprland (VM), worst wrong assumption first
+
+0. Never crash the compositor (seen on 0.56.2 before the guard: SIGSEGV,
+   Hyprland restarted in safe mode): arm; run `hyprctl eval
+   'hl.unbind("escape")'` (removes our bind too); `tostring(__claude_cu_abort[1])`
+   is `HL.Keybind(expired)`; within 2 s the watcher logs "removed at run
+   time" and binds again; disarm; Hyprland keeps running. Repeat with
+   disarm right after the `hl.unbind` (before the poll). 0.55: same.
+1. Removal stays ours (a wrong assumption deletes the user's Escape binds):
+   with a user `bind = , escape, submap, reset` inside a submap (both
+   dialects), arm and disarm, then `hyprctl binds -j` still lists it. Lua
+   0.55/0.56: confirm `remove()` matches the stored key string `EsCaPe`
+   exactly; 0.57: only the object.
+2. Non-consuming (a wrong assumption takes Escape from apps): a physical
+   Escape closes a dialog in the focused app AND produces
+   `custom>>claude-cu-abort`; same with an app that inhibits shortcuts
+   (`dont_inhibit` / `p`).
+3. Virtual keyboard name (a wrong assumption lets the model's Escape abort
+   the turn): `hyprctl devices -j` while `wlroots-bridge key-sequence` runs
+   shows `hl-virtual-keyboard...`; `key-sequence --keys escape` produces NO
+   `custom>>claude-cu-abort`; no physical keyboard name starts with it.
+4. Device scoping works (a wrong assumption = no abort at all): the
+   inclusive `list` / hyprlang device list matches `devices` names; the
+   `EsCaPe` key resolves to Escape.
+5. `j/status` shape per version (`configProvider` `lua` / `hyprlang`; 0.54:
+   `unknown request`); otherwise abort-watch refuses to arm.
+6. Lua: the multi-line `eval` answers `ok`; `__claude_cu_abort` survives
+   between `eval` requests; what `hyprctl reload` does to the binds and the
+   Lua global (stale and reload paths).
+7. hyprlang 0.55/0.56: `keyword bindnpkd` accepted with a space-separated
+   device list; 0.54: `bindnpkd` answers `bind: invalid flag`, `bindnpd` and
+   `keyword unbind , EsCaPe` work.
+8. `j/binds` reports our bind with `description: claude-cu-abort` (arm
+   confirmation) and `submap_universal` as a string; 0.57 text `binds` has
+   the `flags:` line with `ignore_mods`.
+9. `configreloaded>>` arrives on socket2 after `hyprctl reload`.
+10. Bridge key codes (keymap change): `key-sequence --keys ctrl+a` reaches
+    the app as ^A and fires NO Escape bind (neither one scoped to the
+    bridge's virtual keyboard nor an unscoped one); `key-sequence --keys
+    escape` fires no bind scoped to a physical keyboard; `type` with shifted
+    and non-ASCII text (`Hi! é 好 😀`) arrives unchanged.
+11. Still untested on a VM: an app that inhibits shortcuts (`dont_inhibit`),
+    keyboard hot-plug, Hyprland 0.54 (global fallback, `unknown request`
+    status), 0.55 and 0.57 specifics, the hyprlang physical-key path.
 
 ## Error contract
 

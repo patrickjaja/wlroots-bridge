@@ -6,7 +6,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Injected keys use their real key codes.** The virtual keyboard's keymap
+  puts every key that has a US pc105 position there (Escape on KEY_ESC,
+  Control on KEY_LEFTCTRL, letters, digits, named keys) and the rest on
+  unmapped codes. Applications see the same keysyms as before; Hyprland,
+  which matches its key bindings by key code, no longer sees an injected Ctrl
+  as Escape.
+- **Shift combos give the shifted symbol.** `key-sequence --keys shift+a`
+  now delivers `A` (was `a`), `shift+1` delivers `!`, `ctrl+shift+a` delivers
+  Control+`A`, `shift+tab` delivers `ISO_Left_Tab`, like a real keyboard.
+  `type` still delivers every glyph exactly as given.
+
 ### Added
+
+- **`abort-watch` (optional contract addition).** Escape on a physical keyboard stops
+  Computer Use: sway per-keyboard `bindsym --input-device` + `binding` event
+  (consumes Escape while armed), Hyprland non-consuming per-device bind of the
+  `event` dispatcher (Lua `hl.bind` over `eval`, hyprlang `bindnpkd`, global
+  `bindnpd` fallback with counted suspend/resume). The bridge's own virtual
+  keyboard never aborts; a user's own Escape binding makes it refuse to arm
+  and is never unbound; binds are shared per compositor instance across
+  profiles, cleared after a crash, healable with `abort-watch </dev/null`.
+  `doctor` reports `abortWatch` with `stale`, `skippedKeyboards`, `consumes`.
 
 - **Window geometry on sway and Hyprland.** `windows` fills `geometry`,
   `output`, `pid`, `is_visible` and `stacking_order` from the compositor IPC for

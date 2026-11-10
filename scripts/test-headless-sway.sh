@@ -42,7 +42,10 @@ fi
 # real session.
 export XDG_RUNTIME_DIR="$(mktemp -d)"
 chmod 700 "$XDG_RUNTIME_DIR"
-export WAYLAND_DISPLAY="wlroots-bridge-test-$$"
+# sway picks its own socket name (wayland-N) and, when WAYLAND_DISPLAY is set,
+# newer releases do not use it for the server socket: start sway without it
+# and export the name it created.
+unset WAYLAND_DISPLAY
 # Headless backend, no real devices, software rendering (llvmpipe) for CI.
 export WLR_BACKENDS=headless
 export WLR_LIBINPUT_NO_DEVICES=1
@@ -52,6 +55,7 @@ export SWAYSOCK="$XDG_RUNTIME_DIR/sway-ipc.sock"
 # present, and exit after we're done (we kill it explicitly).
 SWAY_CONFIG="$XDG_RUNTIME_DIR/sway.conf"
 cat >"$SWAY_CONFIG" <<'EOF'
+xwayland disable
 output HEADLESS-1 resolution 1280x800 position 0 0
 exec sleep 600
 EOF
@@ -62,17 +66,21 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo ">>> starting headless sway on $WAYLAND_DISPLAY"
+echo ">>> starting headless sway"
 sway -c "$SWAY_CONFIG" >"$XDG_RUNTIME_DIR/sway.log" 2>&1 &
 SWAY_PID=$!
 
 # Wait for the wayland socket to appear.
 for _ in $(seq 1 50); do
-  [ -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ] && break
+  sock="$(find "$XDG_RUNTIME_DIR" -maxdepth 1 -name 'wayland-*' -type s | head -1)"
+  [ -n "$sock" ] && break
   sleep 0.2
 done
-if [ ! -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]; then
-  echo "error: sway did not create $WAYLAND_DISPLAY" >&2
+if [ -n "${sock:-}" ]; then
+  export WAYLAND_DISPLAY="$(basename "$sock")"
+  echo ">>> sway is on $WAYLAND_DISPLAY"
+else
+  echo "error: sway did not create a wayland socket" >&2
   cat "$XDG_RUNTIME_DIR/sway.log" >&2 || true
   exit 1
 fi
@@ -114,7 +122,7 @@ echo "$SCREENS" | grep -q '"height":800' || { echo "!!! screens: expected 800 ta
 # --- screenshot: must return base64 + plausible dimensions ---
 echo ">>> screenshot"
 SHOT="$("$BIN" screenshot)"
-echo "$SHOT" | head -c 120; echo " ...(truncated)"
+printf "%s" "${SHOT:0:120}"; echo " ...(truncated)"
 echo "$SHOT" | grep -q '"base64":"' || { echo "!!! screenshot: no base64" >&2; fail=1; }
 # 1280x800 = 1.024M px < cap, so the emitted size should match native.
 echo "$SHOT" | grep -q '"width":1280' || { echo "!!! screenshot: width not 1280" >&2; fail=1; }

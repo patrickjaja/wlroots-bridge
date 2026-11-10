@@ -63,8 +63,15 @@ struct Keyboard {
 
 impl Keyboard {
     /// Create a virtual keyboard and upload a keymap binding `keysyms`.
-    fn create(conn: &Conn, qh: &QueueHandle<KeyboardState>, keysyms: &[u32]) -> Result<Self> {
-        let keymap = keymap::generate_keymap(keysyms);
+    /// `shift_levels`: the command holds Shift, so keys get their real
+    /// shifted symbol (see [`keymap::generate_keymap_with`]).
+    fn create(
+        conn: &Conn,
+        qh: &QueueHandle<KeyboardState>,
+        keysyms: &[u32],
+        shift_levels: bool,
+    ) -> Result<Self> {
+        let keymap = keymap::generate_keymap_with(keysyms, shift_levels);
         let manager = conn.bind_virtual_keyboard_manager(qh)?;
         let seat = conn.bind_seat(qh)?;
         let had_keyboard = conn.seat_has(wl_seat::Capability::Keyboard);
@@ -171,7 +178,8 @@ pub fn key_sequence(conn: &Conn, keys: &str, repeat: Option<u32>) -> Result<Keyb
 
     let mut queue = conn.conn.new_event_queue::<KeyboardState>();
     let qh = queue.handle();
-    let kb = Keyboard::create(conn, &qh, &[base_keysym])?;
+    let shift = spec.modifiers.iter().any(|m| keymap::is_shift(m));
+    let kb = Keyboard::create(conn, &qh, &[base_keysym], shift)?;
 
     // Resolve modifier evdev codes against the generated keymap.
     let mut modifier_codes = Vec::with_capacity(spec.modifiers.len());
@@ -265,7 +273,7 @@ pub fn type_text(conn: &Conn, text: &str, delay_ms: u64) -> Result<TypeActionRes
     // in that page. Simpler correct approach: if the whole set fits one page
     // (the overwhelmingly common case), one keyboard + one pass.
     if distinct.len() <= MAX_KEYS_PER_PAGE {
-        let kb = Keyboard::create(conn, &qh, &distinct)?;
+        let kb = Keyboard::create(conn, &qh, &distinct, false)?;
         for (i, &slot) in char_to_slot.iter().enumerate() {
             if i > 0 && delay_ms > 0 {
                 queue.flush().ok();
@@ -285,7 +293,7 @@ pub fn type_text(conn: &Conn, text: &str, delay_ms: u64) -> Result<TypeActionRes
                 thread::sleep(Duration::from_millis(delay_ms));
             }
             let ks = keymap::keysym_for_char(ch)?;
-            let kb = Keyboard::create(conn, &qh, &[ks])?;
+            let kb = Keyboard::create(conn, &qh, &[ks], false)?;
             tap(&kb, 0);
             queue
                 .roundtrip(&mut KeyboardState)
@@ -344,7 +352,8 @@ pub fn hold_key(conn: &Conn, keys: &[String], duration_ms: u64) -> Result<Keyboa
     let stop = StopSignals::install();
     let mut queue = conn.conn.new_event_queue::<KeyboardState>();
     let qh = queue.handle();
-    let kb = Keyboard::create(conn, &qh, &base_keysyms)?;
+    let shift = mods.iter().any(|m| keymap::is_shift(m));
+    let kb = Keyboard::create(conn, &qh, &base_keysyms, shift)?;
 
     let mod_codes: Vec<u32> = mods
         .iter()
@@ -408,7 +417,7 @@ impl ModifierHold {
         let mut queue = conn.conn.new_event_queue::<KeyboardState>();
         let qh = queue.handle();
         // A keymap with no base keys still binds the four modifier keys.
-        let kb = Keyboard::create(conn, &qh, &[])?;
+        let kb = Keyboard::create(conn, &qh, &[], false)?;
         let mut codes = Vec::with_capacity(modifiers.len());
         for name in modifiers {
             codes.push(keymap::modifier_evdev_code(&kb.keymap, name)?);

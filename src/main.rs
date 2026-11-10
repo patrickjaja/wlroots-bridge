@@ -1,3 +1,4 @@
+mod abort;
 mod ax;
 mod capture;
 mod cli;
@@ -22,7 +23,12 @@ use crate::input::pointer::Button;
 use crate::output::print_json;
 
 fn main() -> ExitCode {
-    match run() {
+    let cli = Cli::parse();
+    // abort-watch owns stdout/stdin/signals and its own exit codes.
+    if matches!(cli.command, Command::AbortWatch) {
+        return abort::run();
+    }
+    match run(cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("{error:#}");
@@ -34,10 +40,9 @@ fn main() -> ExitCode {
     }
 }
 
-fn run() -> Result<()> {
-    let cli = Cli::parse();
-
+fn run(cli: Cli) -> Result<()> {
     match cli.command {
+        Command::AbortWatch => unreachable!("handled in main"),
         // Session lifecycle is a no-op on wlroots-Wayland: the virtual-input and
         // screencopy protocols are stateless per-request (no portal session to
         // keep alive, unlike KWin). We report success so the JS session
