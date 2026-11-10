@@ -196,8 +196,8 @@ impl Dispatch<zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1, ()> 
                 // `st` is a byte array of u32 state enum values.
                 let mut activated = false;
                 let mut minimized = false;
-                for chunk in st.chunks_exact(4) {
-                    let v = u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                for chunk in st.as_chunks::<4>().0 {
+                    let v = u32::from_ne_bytes(*chunk);
                     // wlr state enum: 0=maximized,1=minimized,2=activated,3=fullscreen
                     if v == 1 {
                         minimized = true;
