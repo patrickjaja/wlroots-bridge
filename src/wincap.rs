@@ -971,7 +971,8 @@ fn decode_rgba(data: &[u8], fmt: BufferFormat, y_invert: bool) -> Result<WinImag
         let sy = if y_invert { h - 1 - y } else { y };
         let src = &data[sy * st..sy * st + w * 4];
         let dst = &mut px[y * w * 4..(y + 1) * w * 4];
-        for (s, d) in src.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
+        let (src, dst) = (src.as_chunks::<4>().0, dst.as_chunks_mut::<4>().0);
+        for (s, d) in src.iter().zip(dst.iter_mut()) {
             d[0] = s[ro];
             d[1] = s[go];
             d[2] = s[bo];
