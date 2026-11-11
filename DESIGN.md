@@ -65,8 +65,9 @@ snake_case.
 
 | Subcommand | Output shape | JS reader (evidence) |
 |---|---|---|
-| `doctor` | contract v1 keys (see below) plus, when the compositor is reachable, `{wayland_display, compositor, globals:{virtual_pointer, virtual_keyboard, screencopy, foreign_toplevel_wlr, foreign_toplevel_ext, xdg_output, wl_output_count, wl_seat, wl_shm}}`, and always `abortWatch:{mechanism, available, reason}` | always exit 0 |
+| `doctor` | contract v1 keys (see below) plus, when the compositor is reachable, `{wayland_display, compositor, globals:{virtual_pointer, virtual_keyboard, screencopy, foreign_toplevel_wlr, foreign_toplevel_ext, xdg_output, wl_output_count, wl_seat, wl_shm}}`, and always `abortWatch:{mechanism, available, reason}` and `capabilities:{overlay, overlay_alpha_modifier, overlay_fractional_scale}` | always exit 0 |
 | `abort-watch` | long-running, JSON lines (see "abort-watch") | optional addition |
+| `overlay` | long-running, JSON lines, cu-overlay protocol 1 (see "overlay") | optional addition |
 | `screens` | `[{id, name, geometry:{x,y,width,height}, scale, refresh_millihz, is_active, is_primary}]` | `mapRustScreenToDisplay` reads `geometry.*`, `scale`, `is_primary`, `name`, `id` (-> `_bridgeId`) |
 | `screenshot [--display N] [--keep-window ID]... [--mask-all]` | `{base64, width, height, displayWidth, displayHeight, displayId, originX, originY, mask?}` (camelCase) | `screenshotResultFromRust` reads `result.displayWidth`/`displayHeight`/`originX`/`originY` |
 | `zoom --x --y --w --h [--display N] [--keep-window ID]... [--mask-all]` | `{base64, width, height, mask?}` | `zoom` reads `result.base64`/`width`/`height` |
@@ -490,7 +491,8 @@ visible regions is painted over. A kept window's region is its IPC rect minus
 every other visible window that may be above it (only a tiled window on the
 same workspace under a floating or fullscreen kept window is known to be
 below; floating-over-floating is always cut), minus Hyprland layer surfaces on
-the `top`/`overlay` levels, minus the four `decoration:rounding` corner squares
+the `top`/`overlay` levels (except the caller's own overlay, see "The caller's
+own overlay"), minus the four `decoration:rounding` corner squares
 on Hyprland. The regions are mapped onto the captured image, which is already
 in logical orientation (the output transform is undone first), with exact
 integer math, rounding kept areas inward, so a partly covered pixel is masked
@@ -518,6 +520,103 @@ final position.
 without input focus. The command exits 1 with a clean error. The JS executor
 uses Electron's `getCursorScreenPoint()` on this path anyway, so this is never a
 functional gap.
+
+### The caller's own overlay
+
+`wlroots-bridge overlay` (see "overlay") puts a full-output, transparent,
+click-through layer surface on the `overlay` level.
+
+- Per-window capture (`capture:"toplevel"`, the Hyprland default): no layer
+  surface is ever in the image, so the overlay cannot hide or reveal anything;
+  the kept windows come without rim or arrow.
+- Output cut (`capture:"output"`: sway's default, Hyprland without a
+  per-window protocol, `WLROOTS_BRIDGE_MASK_CAPTURE=output`, or the fallback
+  after a window did not settle): on Hyprland the overlay, subtracted like any
+  other layer surface, would leave no kept pixel on its output
+  (`shown:false`, `coveredBy: ["layer:claude-cu-overlay"]`).
+
+The parse of `j/layers` (`ipc::parse_hypr`) therefore leaves a surface out of
+`Snapshot::overlays` (so it is neither cut nor named in `coveredBy`) when
+`own_overlay::is_own_overlay(namespace, pid)` holds, which requires ALL of:
+
+1. the namespace is exactly `claude-cu-overlay` (cu-overlay's
+   `backend::layer_shell::NAMESPACE`, not a copy);
+2. the bridge has a caller: `getppid()` > 1. Claude Desktop runs every bridge
+   command directly from its main process (`execFile`); the overlay must be
+   spawned directly from that same process (as `abort-watch` is);
+3. `j/layers` reports the surface's pid (Hyprland takes it from the Wayland
+   client's socket credentials, so a client cannot choose it), and that pid is
+   the caller itself or a process whose parent (`/proc/<pid>/stat` field 4) is
+   the caller: the app's own `wlroots-bridge overlay`, a sibling of the
+   capturing bridge. A grandchild (a shell an agent started, a process an MCP
+   server forked) does not qualify.
+
+Safety argument (same shape as x11-bridge's `--ignore-window`): looking through
+a surface only removes one cut. A kept region is still the kept window's rect
+minus every other window, every other layer surface and the rounded corners, so
+nothing outside the kept windows is ever kept and no non-kept window is
+revealed. Over a kept window the image shows what was composited there: the
+window plus the overlay's own rim / arrow pixels. A false positive can only let
+a direct child of the app draw over a kept window; a false negative (pid
+missing, an unexpected spawn chain, a `j/layers` without `pid`) masks the kept
+window under the overlay, i.e. fails closed into the behavior before this rule.
+Not checked on purpose: the binary of the owning process (a package upgrade
+while the app runs would make every masked capture black until the overlay is
+restarted).
+
+sway: `GET_TREE` lists no layer surfaces (`screenshot_mask_gaps:
+layer_shell_top_overlay`), so on the output cut the overlay never cut a kept
+window and the rule is not consulted; the masked image is the kept windows
+(rim and arrow over them) and #1E1E1E elsewhere. With
+`WLROOTS_BRIDGE_MASK_CAPTURE=ext` the kept windows come without the overlay. niri, river and others have no window-geometry
+IPC: `--keep-window` fails as before, `--mask-all` is unaffected.
+
+Enumeration (`windows`, `frontmost-app`, `app-under-point`) reads
+foreign-toplevel plus the window IPC, neither of which contains layer
+surfaces, so the overlay changes none of them (`app-under-point` stays `null`
+on Wayland).
+
+## overlay (optional contract addition)
+
+`overlay` runs `cu_overlay::run(stdin, stdout)` and returns its exit code
+straight from `main`, before the one-shot dispatcher (like `abort-watch`), so
+nothing else can write to stdout. The crate owns the protocol, the renderer,
+its own Wayland connection and parent death (`PR_SET_PDEATHSIG` = SIGTERM plus
+a 500 ms check of `CLAUDE_CU_PARENT_PID` by pid + start time, else of
+`getppid`); the bridge sets no signal handler or death signal of its own for
+this subcommand, so there is no double handling. Exit codes and the protocol:
+cu-overlay's README.
+
+`doctor` adds `capabilities` (always present, all false when the compositor is
+unreachable), from the registry sweep it already does (no extra round trip):
+
+- `overlay`: `zwlr_layer_shell_v1` is advertised;
+- `overlay_alpha_modifier`: plus `wp_alpha_modifier_v1` (fades, glow pulse);
+- `overlay_fractional_scale`: plus `wp_fractional_scale_manager_v1` and
+  `wp_viewporter` (crisp buffers at fractional scales).
+
+### To verify on a real Hyprland (VM)
+
+1. `hyprctl -j layers` with the overlay shown lists it on level 3 with
+   `"namespace": "claude-cu-overlay"` and a `pid` equal to the overlay
+   process (not 0, not missing; older Hyprland releases may lack `pid`, which
+   fails closed).
+2. With Claude Desktop running Computer Use, the screenshot bridge's parent and
+   the overlay's parent are the same pid (`ps -o pid,ppid,args -C
+   wlroots-bridge`); if the app ever spawns either through a wrapper or a
+   utility process, the rule refuses and masked captures go black under the
+   overlay.
+3. A masked `screenshot --keep-window <id>` with the overlay up shows the kept
+   window (plus rim / arrow over it), everything else #1E1E1E; the same with a
+   notification over the kept window still masks the notification.
+4. A `claude-cu-overlay` surface started by something that is not a child of
+   the app (e.g. `cu-overlay-demo` from a terminal) still blacks the kept
+   window out (refused).
+5. `doctor` reports `capabilities.overlay: true` and the two optional flags as
+   the compositor advertises them; the overlay is click-through (a click at the
+   arrow reaches the window below).
+6. The overlay itself (rim, arrow) renders at the right place on a scaled and a
+   rotated monitor (cu-overlay's own checklist).
 
 ## CLI contract v1
 
@@ -552,6 +651,8 @@ The bridge implements the Computer Use bridge CLI contract v1
   `WLROOTS_BRIDGE_MASK_CAPTURE`). All false/empty/null elsewhere. `globals`
   also lists `image_copy_capture`, `toplevel_capture_source`,
   `hyprland_toplevel_export` and `hyprland_toplevel_mapping`.
+- Additive `doctor` key `capabilities: {overlay, overlay_alpha_modifier,
+  overlay_fractional_scale}` (see "overlay").
 - Every coordinate flag accepts negative values (layouts can start left of or
   above the origin).
 - `tests/contract.rs` runs these checks against the binary without a compositor.

@@ -13,8 +13,9 @@
 //!
 //! 1. its namespace is exactly [`OVERLAY_NAMESPACE`];
 //! 2. this bridge has a caller: `getppid()` > 1. Claude Desktop runs every
-//!    bridge command directly from its main process (`execFile` /
-//!    `spawn`), so our parent is the app;
+//!    bridge command directly from its main process (`execFile`), so our
+//!    parent is the app; the overlay must be spawned directly from that same
+//!    process (as `abort-watch` is);
 //! 3. the compositor reports the surface's pid (the Wayland client's peer
 //!    credentials), and that pid is the caller itself or a process whose
 //!    parent is the caller: the app's own `wlroots-bridge overlay` child, a

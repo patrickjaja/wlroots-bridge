@@ -105,7 +105,7 @@ for g in virtual_pointer virtual_keyboard screencopy xdg_output; do
   fi
 done
 
-for kv in '"contract":1' '"bridge":"wlroots-bridge"' '"backend_reachable":true' '"session_match":true'; do
+for kv in '"contract":1' '"bridge":"wlroots-bridge"' '"backend_reachable":true' '"session_match":true' '"overlay":true'; do
   if ! echo "$DOCTOR" | grep -qF "$kv"; then
     echo "!!! doctor: expected $kv under headless sway" >&2
     fail=1

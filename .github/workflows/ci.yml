@@ -106,7 +106,7 @@ jobs:
       - name: Install sway (headless wlroots compositor)
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends sway
+          sudo apt-get install -y --no-install-recommends sway foot
 
       - name: cargo build (release)
         run: cargo build --release --locked --target x86_64-unknown-linux-musl
@@ -124,3 +124,11 @@ jobs:
         env:
           WLROOTS_BRIDGE_REQUIRE_SWAY: "1"
         run: cargo test --locked --target x86_64-unknown-linux-musl --test abort_sway
+
+      # overlay subcommand against real headless sway (rim + arrow in
+      # screenshots, parent death, enumeration and masked capture with the
+      # overlay up; foot provides the windows).
+      - name: overlay tests (real sway)
+        env:
+          WLROOTS_BRIDGE_REQUIRE_SWAY: "1"
+        run: cargo test --locked --target x86_64-unknown-linux-musl --test overlay_sway

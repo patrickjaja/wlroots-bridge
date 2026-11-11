@@ -64,7 +64,9 @@ Run `wlroots-bridge doctor` to see what the running compositor advertises (see
 `wlroots-bridge` is **pure Rust with zero C dependencies** - it uses
 `wayland-client`'s `client_rust` backend (no `libwayland`; the Hyprland
 protocol XML it uses is vendored in `protocols/` and compiled in), generates its XKB
-keymap text itself (no `libxkbcommon`), and uses the `image` crate for JPEG. It
+keymap text itself (no `libxkbcommon`), uses the `image` crate for JPEG and the
+pure-Rust `cu-overlay` / `tiny-skia` for the `overlay` subcommand (notices in
+[THIRD-PARTY.md](THIRD-PARTY.md)). It
 builds as a **fully static musl binary** linked with `rust-lld`, so there is no
 external cross-linker and no runtime library dependency at all. The same binary
 runs on Arch, Ubuntu, Debian, Fedora, RHEL, and **NixOS** without patching an
@@ -116,6 +118,8 @@ scripts/test-headless-sway.sh
 
 One-shot subcommands. Each prints a single JSON object/array on stdout; on
 failure it prints a message to stderr and exits 1 (clap parse errors exit 2).
+The two long-running exceptions, `abort-watch` and `overlay`, speak JSON lines
+instead (one object per line, see their sections).
 
 | Subcommand | Purpose |
 |---|---|
@@ -135,6 +139,7 @@ failure it prints a message to stderr and exits 1 (clap parse errors exit 2).
 | `activate-window --window <id>` | Raise + focus a window (wlr foreign-toplevel; works on Sway/Hyprland/Niri) |
 | `session-start` / `session-end` / `forget-session` | No-ops (`session-start` -> `{"ok":true,"session":"noop"}`; the others report `ended:false, daemon:"none"`) |
 | `abort-watch` | Long-running Escape watcher (optional contract addition, sway and Hyprland): JSON lines on stdout, `suspend` / `resume` on stdin |
+| `overlay` | Long-running Computer Use glow + drawn cursor on a click-through layer surface (optional contract addition, any compositor with wlr-layer-shell): JSON lines both ways |
 
 ```sh
 wlroots-bridge doctor
@@ -160,6 +165,56 @@ The CLI follows the Computer Use bridge CLI contract v1 of claude-desktop-extra:
 `session-end` and `forget-session` report `ended:false, daemon:"none"` (this
 bridge has no session daemon or grant), and every coordinate flag accepts
 negative values.
+
+## Computer Use overlay (`overlay`, optional contract addition)
+
+`overlay` draws Claude Desktop's Computer Use glow and drawn cursor (rim,
+arrow, press ring) on a full-output wlr-layer-shell surface on the `overlay`
+layer: always on top, fully click-through (empty input region, no keyboard
+interactivity), namespace `claude-cu-overlay`. The renderer, the JSON-lines
+protocol (protocol 1: `show` / `move` / `glide` / `jump` / `press` / `look` /
+`hide` / `capture` in, `ready` / `outputs` / `shown` / `hidden` / `ack` /
+`error` out), the exit codes and the parent-death handling are the shared
+[cu-overlay](https://github.com/patrickjaja/cu-overlay) crate; the subcommand
+only hands it stdin and stdout. It opens its own Wayland connection and never
+touches the virtual pointer, the virtual keyboard or screencopy.
+
+- stdout carries protocol lines only; diagnostics go to stderr.
+- Exit 0 on stdin EOF or when the parent dies (`PR_SET_PDEATHSIG` plus a
+  500 ms check of `CLAUDE_CU_PARENT_PID`, else of the direct parent, as
+  `abort-watch`); 1 when the display or stdout is lost; 2 without
+  wlr-layer-shell (fatal `error` line first) or when `show` names an unknown
+  output. The surfaces die with the process's connection on any exit.
+- `doctor` reports `capabilities: {overlay, overlay_alpha_modifier,
+  overlay_fractional_scale}`: `overlay` = `zwlr_layer_shell_v1` is advertised
+  (sway, Hyprland, niri, river, labwc, ...); the other two say whether fades /
+  the glow pulse and crisp fractional-scale buffers are available (the overlay
+  works without them, see cu-overlay's fallbacks).
+
+Screenshots with the overlay up:
+
+| Capture | sway | Hyprland | niri, river, others |
+|---|---|---|---|
+| plain `screenshot` / `zoom` | the overlay is in the image (rim, arrow over the apps) | same | same |
+| `--keep-window`, per-window capture (`capture:"toplevel"`; Hyprland default, sway with `WLROOTS_BRIDGE_MASK_CAPTURE=ext`) | kept windows without the overlay, everything else #1E1E1E | same | - |
+| `--keep-window`, output cut (`capture:"output"`; sway default, Hyprland fallback or `WLROOTS_BRIDGE_MASK_CAPTURE=output`) | kept windows with the rim / arrow composited over them; everything else, rim included, #1E1E1E. sway's IPC lists no layer surfaces, so the overlay never cut a kept window | same, through the look-through rule below (`shown:true`, no `layer:claude-cu-overlay` in `coveredBy`) | refused as before (no window-geometry IPC) |
+| `--mask-all` | all #1E1E1E | all #1E1E1E | all #1E1E1E |
+
+Callers that want the overlay out of a capture send `capture` / `hide` first
+(acknowledged after the compositor applied it).
+
+The look-through rule (Hyprland, output cut): the cut removes every
+`top`/`overlay` layer surface from the kept windows, which would black out every
+masked capture while the overlay is up. A layer surface is left out of the cut
+and out of `coveredBy` only when its namespace is exactly `claude-cu-overlay`
+AND the compositor-reported pid is the bridge's parent (the app) or a direct
+child of it (the app's own `overlay` process, a sibling of the capturing
+bridge). Anything else stays an occluder. This only ever removes one cut, so it
+cannot widen what is kept or reveal a non-kept window. Details:
+[DESIGN.md](DESIGN.md#the-callers-own-overlay).
+
+Tests: `tests/overlay_sway.rs` (real headless sway; skipped without `sway` /
+`foot`, fails instead with `WLROOTS_BRIDGE_REQUIRE_SWAY=1`, as in CI).
 
 ## Escape abort (`abort-watch`, optional contract addition)
 

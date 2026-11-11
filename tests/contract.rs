@@ -70,6 +70,15 @@ fn doctor_without_compositor_exits_zero_with_required_keys() {
     assert_eq!(v["screenshot_mask_gaps"], serde_json::json!([]));
     assert!(v["screenshot_mask_mode"].is_null());
     assert!(v["screenshot_mask_protocol"].is_null());
+    // Overlay capabilities (additive), next to the mask keys: all false here.
+    assert_eq!(
+        v["capabilities"],
+        serde_json::json!({
+            "overlay": false,
+            "overlay_alpha_modifier": false,
+            "overlay_fractional_scale": false
+        })
+    );
     // Contract v2 key: no sway / Hyprland in the scrubbed environment.
     assert_eq!(
         v["abortWatch"],
