@@ -242,6 +242,35 @@ pub struct DoctorReport {
     /// Additive (optional contract addition): whether `abort-watch` would arm here.
     #[serde(rename = "abortWatch")]
     pub abort_watch: serde_json::Value,
+    /// Additive: optional subcommands this compositor can serve.
+    pub capabilities: DoctorCapabilities,
+}
+
+/// `capabilities` of the doctor report (additive, always present; all false
+/// when the compositor is unreachable). From the registry sweep doctor
+/// already does: no extra round trip.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct DoctorCapabilities {
+    /// `overlay` can draw here: `zwlr_layer_shell_v1` is advertised.
+    pub overlay: bool,
+    /// `wp_alpha_modifier_v1`: overlay fades, glow pulse, zero-cost capture
+    /// hide (without it: instant show/hide, static glow).
+    pub overlay_alpha_modifier: bool,
+    /// `wp_fractional_scale_manager_v1` + `wp_viewporter`: crisp overlay at
+    /// fractional scales (without them: integer-scale buffers).
+    pub overlay_fractional_scale: bool,
+}
+
+impl DoctorCapabilities {
+    pub fn from_globals(g: &crate::conn::Globals) -> Self {
+        Self {
+            overlay: g.layer_shell.is_some(),
+            overlay_alpha_modifier: g.layer_shell.is_some() && g.alpha_modifier.is_some(),
+            overlay_fractional_scale: g.layer_shell.is_some()
+                && g.fractional_scale.is_some()
+                && g.viewporter.is_some(),
+        }
+    }
 }
 
 /// Presence + bound version of each global we depend on. `Some(v)` = advertised

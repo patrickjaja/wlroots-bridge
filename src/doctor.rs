@@ -14,7 +14,7 @@ use crate::conn::{Conn, detect_compositor};
 const MASK_PROBE_BUDGET: Duration = Duration::from_millis(1500);
 /// The whole doctor stays under this (the launcher kills it at 5 s).
 const DOCTOR_BUDGET: Duration = Duration::from_millis(4700);
-use crate::output::{DoctorGlobals, DoctorReport};
+use crate::output::{DoctorCapabilities, DoctorGlobals, DoctorReport};
 
 /// Build the report. Never fails: a connection error becomes `backend_error`.
 pub fn doctor() -> DoctorReport {
@@ -49,6 +49,7 @@ pub fn doctor() -> DoctorReport {
         screenshot_mask_mode: None,
         screenshot_mask_protocol: None,
         abort_watch: serde_json::Value::Null,
+        capabilities: DoctorCapabilities::default(),
     };
     // The mask probe (the full IPC read a masked capture needs) runs beside the
     // accessibility doctor so the two together stay under the launcher's 5 s.
@@ -81,6 +82,7 @@ pub fn doctor() -> DoctorReport {
                 && g.screencopy.is_some();
             report.wayland_display = display;
             report.compositor = Some(detect_compositor());
+            report.capabilities = DoctorCapabilities::from_globals(g);
             report.globals = Some(DoctorGlobals {
                 virtual_pointer: g.virtual_pointer.map(|b| b.version),
                 virtual_keyboard: g.virtual_keyboard.map(|b| b.version),
@@ -118,4 +120,49 @@ pub fn doctor() -> DoctorReport {
         }
     }
     report
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::conn::{BoundGlobal, Globals};
+
+    fn bg(version: u32) -> Option<BoundGlobal> {
+        Some(BoundGlobal { name: 1, version })
+    }
+
+    #[test]
+    fn capabilities_json() {
+        let json = |g: &Globals| serde_json::to_value(DoctorCapabilities::from_globals(g)).unwrap();
+        let all_false = serde_json::json!({
+            "overlay": false, "overlay_alpha_modifier": false, "overlay_fractional_scale": false
+        });
+        // Unreachable compositor (the report's default) and no layer-shell.
+        assert_eq!(
+            serde_json::to_value(DoctorCapabilities::default()).unwrap(),
+            all_false
+        );
+        let mut g = Globals {
+            alpha_modifier: bg(1),
+            fractional_scale: bg(1),
+            viewporter: bg(1),
+            ..Globals::default()
+        };
+        assert_eq!(json(&g), all_false, "no overlay without layer-shell");
+        g.layer_shell = bg(4);
+        assert_eq!(
+            json(&g),
+            serde_json::json!({
+                "overlay": true, "overlay_alpha_modifier": true, "overlay_fractional_scale": true
+            })
+        );
+        g.viewporter = None;
+        g.alpha_modifier = None;
+        assert_eq!(
+            json(&g),
+            serde_json::json!({
+                "overlay": true, "overlay_alpha_modifier": false, "overlay_fractional_scale": false
+            })
+        );
+    }
 }

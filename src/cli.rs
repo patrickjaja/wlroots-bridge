@@ -27,6 +27,16 @@ pub enum Command {
     /// Long-running Escape watcher (optional contract addition): JSON lines on stdout,
     /// `suspend` / `resume` on stdin. sway and Hyprland only.
     AbortWatch,
+    /// Long-running Computer Use overlay (optional contract addition): JSON lines,
+    /// commands on stdin, events on stdout. Needs wlr-layer-shell.
+    ///
+    /// Draws Claude's glow and drawn cursor on a click-through wlr-layer-shell
+    /// surface (namespace `claude-cu-overlay`), cu-overlay protocol 1. stdout
+    /// carries protocol lines only; diagnostics go to stderr. Exit 0 on stdin
+    /// EOF or the parent's death (CLAUDE_CU_PARENT_PID, else the direct
+    /// parent), 1 when the display or stdout is lost, 2 without layer-shell or
+    /// when `show` names an unknown output.
+    Overlay,
     /// Enumerate screens (wl_output + xdg-output).
     Screens,
     /// Enumerate windows (foreign-toplevel).

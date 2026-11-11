@@ -76,6 +76,14 @@ pub struct Globals {
     pub hyprland_toplevel_mapping: Option<BoundGlobal>,
     /// Every advertised wl_output (name, version).
     pub outputs: Vec<BoundGlobal>,
+    /// `zwlr_layer_shell_v1`: what the `overlay` subcommand draws with.
+    pub layer_shell: Option<BoundGlobal>,
+    /// `wp_alpha_modifier_v1`: overlay fades, glow pulse, capture hide.
+    pub alpha_modifier: Option<BoundGlobal>,
+    /// `wp_fractional_scale_manager_v1`: crisp overlay at fractional scales.
+    pub fractional_scale: Option<BoundGlobal>,
+    /// `wp_viewporter`: the overlay's fractional-scale buffers need it too.
+    pub viewporter: Option<BoundGlobal>,
 }
 
 /// How long [`Conn::settle_new_device`] leaves clients to bind a seat
@@ -240,6 +248,10 @@ impl Dispatch<wl_registry::WlRegistry, ()> for RegistryState {
                     state.globals.hyprland_toplevel_mapping = Some(bound)
                 }
                 "wl_output" => state.globals.outputs.push(bound),
+                "zwlr_layer_shell_v1" => state.globals.layer_shell = Some(bound),
+                "wp_alpha_modifier_v1" => state.globals.alpha_modifier = Some(bound),
+                "wp_fractional_scale_manager_v1" => state.globals.fractional_scale = Some(bound),
+                "wp_viewporter" => state.globals.viewporter = Some(bound),
                 _ => {}
             }
         }

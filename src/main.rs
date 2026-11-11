@@ -8,6 +8,7 @@ mod input;
 mod ipc;
 mod mask;
 mod output;
+mod own_overlay;
 mod protocols;
 mod screens;
 mod transform;
@@ -30,6 +31,12 @@ fn main() -> ExitCode {
     if matches!(cli.command, Command::AbortWatch) {
         return abort::run();
     }
+    // overlay too: cu-overlay owns stdin/stdout (protocol lines only), the
+    // parent-death watch and the exit code. Its own Wayland connection; no
+    // virtual input, no screencopy.
+    if matches!(cli.command, Command::Overlay) {
+        return cu_overlay::run(std::io::stdin(), std::io::stdout());
+    }
     match run(cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -44,7 +51,7 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<()> {
     match cli.command {
-        Command::AbortWatch => unreachable!("handled in main"),
+        Command::AbortWatch | Command::Overlay => unreachable!("handled in main"),
         // Session lifecycle is a no-op on wlroots-Wayland: the virtual-input and
         // screencopy protocols are stateless per-request (no portal session to
         // keep alive, unlike KWin). We report success so the JS session

@@ -457,7 +457,12 @@ pub fn parse_hypr(
                         width: i32_of(l, "w").unwrap_or(0),
                         height: i32_of(l, "h").unwrap_or(0),
                     };
-                    if r.width > 0 && r.height > 0 {
+                    // The caller's own Computer Use overlay is looked through:
+                    // neither a cut in the output-cut path nor a `coveredBy`
+                    // entry (see own_overlay).
+                    let ours =
+                        crate::own_overlay::is_own_overlay(str_of(l, "namespace"), pid_of(l));
+                    if r.width > 0 && r.height > 0 && !ours {
                         overlays.push(Overlay {
                             rect: r,
                             namespace: str_of(l, "namespace").unwrap_or_default().to_owned(),
