@@ -51,9 +51,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   wlr-layer-shell surface (namespace `claude-cu-overlay`), through the shared
   cu-overlay crate (JSON-lines protocol 1, exit 0 on stdin EOF or parent
   death). `doctor` reports `capabilities: {overlay, overlay_alpha_modifier,
-  overlay_fractional_scale}`. Masked captures on Hyprland look through that
-  surface only when its pid is the app or a direct child of it, so kept
-  windows keep their pixels while the overlay is up.
+  overlay_fractional_scale}`. Per-window masked captures never contain it.
+  The output cut on Hyprland leaves that surface out (no cut, not in
+  `coveredBy`) only when its pid is the app or a direct child of it, so kept
+  windows stay `shown` while the overlay is up.
 - **`abort-watch` (optional contract addition).** Escape on a physical keyboard stops
   Computer Use: sway per-keyboard `bindsym --input-device` + `binding` event
   (consumes Escape while armed), Hyprland non-consuming per-device bind of the
