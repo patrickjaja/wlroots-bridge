@@ -198,6 +198,7 @@ dependencies = [
 [[package]]
 name = "cu-overlay"
 version = "0.1.0"
+source = "git+https://github.com/patrickjaja/cu-overlay?rev=8e5953ec9c4a835a562487a0a519da16a5310888#8e5953ec9c4a835a562487a0a519da16a5310888"
 dependencies = [
  "libc",
  "serde",

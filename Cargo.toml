@@ -10,9 +10,8 @@ description = "wlroots-Wayland support bridge for Linux computer-use tooling (Cl
 cu-atspi = { git = "https://github.com/patrickjaja/cu-atspi", rev = "a390259e9209fda8bb518a8ef253198ba3435ef0" }
 # Shared runner for the `abort-watch` subcommand, pinned by rev like cu-atspi.
 cu-abort-watch = { git = "https://github.com/patrickjaja/cu-abort-watch", rev = "c8be7212b6e40e582aebc6023d69d20bbedf79dc" }
-# Shared layer-shell renderer for the `overlay` subcommand. LOCAL PATH while
-# cu-overlay is unpublished; switch to a git rev like the two above.
-cu-overlay = { path = "../cu-overlay" }
+# Shared layer-shell renderer for the `overlay` subcommand (glow and drawn cursor).
+cu-overlay = { git = "https://github.com/patrickjaja/cu-overlay", rev = "8e5953ec9c4a835a562487a0a519da16a5310888" }
 libc = { version = "0.2.186", default-features = false, features = ["std"] }
 anyhow = "1.0.102"
 base64 = "0.22.1"
