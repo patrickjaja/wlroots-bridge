@@ -46,6 +46,8 @@ pub fn doctor() -> DoctorReport {
         window_geometry: false,
         screenshot_mask: false,
         screenshot_mask_gaps: Vec::new(),
+        screenshot_mask_mode: None,
+        screenshot_mask_protocol: None,
         abort_watch: serde_json::Value::Null,
     };
     // The mask probe (the full IPC read a masked capture needs) runs beside the
@@ -89,13 +91,28 @@ pub fn doctor() -> DoctorReport {
                 wl_output_count: g.outputs.len(),
                 wl_seat: g.seat.map(|b| b.version),
                 wl_shm: g.shm.map(|b| b.version),
+                image_copy_capture: g.image_copy_capture.map(|b| b.version),
+                toplevel_capture_source: g.toplevel_capture_source.map(|b| b.version),
+                hyprland_toplevel_export: g.hyprland_toplevel_export.map(|b| b.version),
+                hyprland_toplevel_mapping: g.hyprland_toplevel_mapping.map(|b| b.version),
             });
             if let Some(snap) = &snap {
                 report.window_geometry =
                     g.foreign_toplevel_wlr.is_some() || g.foreign_toplevel_ext.is_some();
                 report.screenshot_mask = report.window_geometry && g.screencopy.is_some();
                 if report.screenshot_mask {
-                    report.screenshot_mask_gaps = crate::ipc::mask_gaps(snap.kind).to_vec();
+                    // The path a keep-mode capture takes here, for an upright
+                    // output, with the WLROOTS_BRIDGE_MASK_CAPTURE override.
+                    // A bad override never reads as "cannot mask": the mask
+                    // stays advertised (mode and protocol null) and the
+                    // masked capture fails closed with the override error.
+                    let avail = crate::wincap::Avail::from_globals(g);
+                    let forced = std::env::var(crate::wincap::OVERRIDE_ENV).ok();
+                    let (mode, protocol, gaps) =
+                        crate::wincap::doctor_mask_fields(avail, snap.kind, forced.as_deref());
+                    report.screenshot_mask_mode = mode;
+                    report.screenshot_mask_protocol = protocol;
+                    report.screenshot_mask_gaps = gaps;
                 }
             }
         }

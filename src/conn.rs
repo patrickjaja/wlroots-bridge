@@ -66,6 +66,14 @@ pub struct Globals {
     /// How many `wl_seat` globals the compositor advertises.
     pub seat_count: usize,
     pub shm: Option<BoundGlobal>,
+    /// `ext_image_copy_capture_manager_v1` (staging).
+    pub image_copy_capture: Option<BoundGlobal>,
+    /// `ext_foreign_toplevel_image_capture_source_manager_v1` (staging).
+    pub toplevel_capture_source: Option<BoundGlobal>,
+    /// `hyprland_toplevel_export_manager_v1`.
+    pub hyprland_toplevel_export: Option<BoundGlobal>,
+    /// `hyprland_toplevel_mapping_manager_v1`.
+    pub hyprland_toplevel_mapping: Option<BoundGlobal>,
     /// Every advertised wl_output (name, version).
     pub outputs: Vec<BoundGlobal>,
 }
@@ -219,6 +227,18 @@ impl Dispatch<wl_registry::WlRegistry, ()> for RegistryState {
                     state.globals.seat_count += 1;
                 }
                 "wl_shm" => state.globals.shm = Some(bound),
+                "ext_image_copy_capture_manager_v1" => {
+                    state.globals.image_copy_capture = Some(bound)
+                }
+                "ext_foreign_toplevel_image_capture_source_manager_v1" => {
+                    state.globals.toplevel_capture_source = Some(bound)
+                }
+                "hyprland_toplevel_export_manager_v1" => {
+                    state.globals.hyprland_toplevel_export = Some(bound)
+                }
+                "hyprland_toplevel_mapping_manager_v1" => {
+                    state.globals.hyprland_toplevel_mapping = Some(bound)
+                }
                 "wl_output" => state.globals.outputs.push(bound),
                 _ => {}
             }
@@ -243,7 +263,13 @@ pub fn detect_compositor() -> String {
 
 impl Conn {
     /// Bind a fresh registry proxy of type `I` for a discovered global.
-    fn bind<I, U, D>(&self, global: BoundGlobal, cap: u32, qh: &QueueHandle<D>, udata: U) -> I
+    pub(crate) fn bind<I, U, D>(
+        &self,
+        global: BoundGlobal,
+        cap: u32,
+        qh: &QueueHandle<D>,
+        udata: U,
+    ) -> I
     where
         I: wayland_client::Proxy + 'static,
         D: Dispatch<I, U> + 'static,

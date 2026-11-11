@@ -954,6 +954,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64",
+ "bitflags",
  "clap",
  "cu-abort-watch",
  "cu-atspi",
@@ -965,6 +966,7 @@ dependencies = [
  "wayland-protocols",
  "wayland-protocols-misc",
  "wayland-protocols-wlr",
+ "wayland-scanner",
  "xkeysym",
 ]
 

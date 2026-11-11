@@ -65,6 +65,11 @@ fn doctor_without_compositor_exits_zero_with_required_keys() {
     assert!(v["backend_error"].is_string());
     assert!(v["restore_token_path"].is_null());
     assert!(v["session_socket"].is_null());
+    // Mask keys are present (additive) and say "no mask" here.
+    assert_eq!(v["screenshot_mask"], false);
+    assert_eq!(v["screenshot_mask_gaps"], serde_json::json!([]));
+    assert!(v["screenshot_mask_mode"].is_null());
+    assert!(v["screenshot_mask_protocol"].is_null());
     // Contract v2 key: no sway / Hyprland in the scrubbed environment.
     assert_eq!(
         v["abortWatch"],

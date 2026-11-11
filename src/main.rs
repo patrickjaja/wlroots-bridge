@@ -8,8 +8,10 @@ mod input;
 mod ipc;
 mod mask;
 mod output;
+mod protocols;
 mod screens;
 mod transform;
+mod wincap;
 mod wm;
 
 use std::process::ExitCode;

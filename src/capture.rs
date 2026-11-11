@@ -41,6 +41,7 @@ use crate::mask::{self, MaskReport, MaskRequest};
 use crate::output::{Rect, ScreenshotCapture, ScreenshotResult};
 use crate::screens::{self, OutputGeometry};
 use crate::transform::Transform;
+use crate::wincap;
 
 /// Long-edge cap on the encoded image, in physical pixels. Mirrors x11-bridge.
 pub const MAX_LONG_EDGE: u32 = 1568;
@@ -50,20 +51,32 @@ pub const MAX_PIXELS: u32 = 1_150_000;
 const JPEG_QUALITY: u8 = 75;
 
 /// A packed 8-bit-per-channel RGB image (row-major, no padding).
-struct RgbImage {
-    width: u32,
-    height: u32,
+pub(crate) struct RgbImage {
+    pub(crate) width: u32,
+    pub(crate) height: u32,
     /// `width * height * 3` bytes, R,G,B per pixel.
-    pixels: Vec<u8>,
+    pub(crate) pixels: Vec<u8>,
+}
+
+impl RgbImage {
+    /// A `width x height` image in the mask colour.
+    pub(crate) fn mask_canvas(width: u32, height: u32) -> Self {
+        let n = (width as usize) * (height as usize) * 3;
+        Self {
+            width,
+            height,
+            pixels: mask::MASK_RGB.iter().copied().cycle().take(n).collect(),
+        }
+    }
 }
 
 /// The screencopy buffer format the compositor advertised for an output.
 #[derive(Debug, Clone, Copy)]
-struct BufferFormat {
-    format: wl_shm::Format,
-    width: u32,
-    height: u32,
-    stride: u32,
+pub(crate) struct BufferFormat {
+    pub(crate) format: wl_shm::Format,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) stride: u32,
 }
 
 /// State driving one screencopy frame to completion.
@@ -119,16 +132,16 @@ wayland_client::delegate_noop!(CaptureState: ignore wl_shm_pool::WlShmPool);
 wayland_client::delegate_noop!(CaptureState: ignore wl_buffer::WlBuffer);
 
 /// A memfd-backed shm mapping we can read the copied pixels out of.
-struct ShmBuffer {
+pub(crate) struct ShmBuffer {
     #[allow(dead_code)]
     file: std::fs::File,
-    mmap: memmap_min::Mmap,
-    _pool: wl_shm_pool::WlShmPool,
-    buffer: wl_buffer::WlBuffer,
+    pub(crate) mmap: memmap_min::Mmap,
+    pool: wl_shm_pool::WlShmPool,
+    pub(crate) buffer: wl_buffer::WlBuffer,
 }
 
 /// Minimal read-only mmap helper (no external mmap crate; keeps deps pure Rust).
-mod memmap_min {
+pub(crate) mod memmap_min {
     use anyhow::{Context, Result};
     use std::os::fd::AsRawFd;
 
@@ -208,11 +221,19 @@ mod memmap_min {
 
 impl ShmBuffer {
     /// Allocate a memfd of `size` bytes and wrap it in a `wl_shm_pool` + buffer.
-    fn new<D>(shm: &wl_shm::WlShm, qh: &QueueHandle<D>, fmt: BufferFormat) -> Result<Self>
+    pub(crate) fn new<D>(
+        shm: &wl_shm::WlShm,
+        qh: &QueueHandle<D>,
+        fmt: BufferFormat,
+    ) -> Result<Self>
     where
         D: Dispatch<wl_shm_pool::WlShmPool, ()> + Dispatch<wl_buffer::WlBuffer, ()> + 'static,
     {
         let size = (fmt.stride as usize) * (fmt.height as usize);
+        anyhow::ensure!(
+            size > 0 && size <= i32::MAX as usize,
+            "shm buffer of {size} bytes does not fit a wl_shm pool"
+        );
         let file = create_sealed_memfd(size)?;
 
         let pool = shm.create_pool(file.as_fd(), size as i32, qh, ());
@@ -231,9 +252,16 @@ impl ShmBuffer {
         Ok(Self {
             file,
             mmap,
-            _pool: pool,
+            pool,
             buffer,
         })
+    }
+
+    /// Tell the compositor to free the buffer and its pool (the mapping stays
+    /// readable until drop).
+    pub(crate) fn destroy(&self) {
+        self.buffer.destroy();
+        self.pool.destroy();
     }
 }
 
@@ -308,11 +336,26 @@ fn wait_for_frame(
     state: &mut CaptureState,
     timeout: Duration,
 ) -> Result<bool> {
-    let deadline = Instant::now() + timeout;
+    wait_until(conn, queue, state, Instant::now() + timeout, |s| {
+        s.ready || s.failed
+    })?;
+    Ok(state.ready)
+}
+
+/// Dispatch events until `done(state)` holds or `deadline` passes. Returns
+/// whether `done` held. Checks the state before any blocking, so an
+/// already-delivered event costs no wait.
+pub(crate) fn wait_until<S>(
+    conn: &Connection,
+    queue: &mut EventQueue<S>,
+    state: &mut S,
+    deadline: Instant,
+    done: impl Fn(&S) -> bool,
+) -> Result<bool> {
     loop {
         queue.dispatch_pending(state)?;
-        if state.ready || state.failed {
-            return Ok(state.ready);
+        if done(state) {
+            return Ok(true);
         }
         let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
             return Ok(false);
@@ -420,9 +463,11 @@ const MASK_IPC_DEADLINE: Duration = Duration::from_millis(1500);
 /// Capture an output and apply `mask` (see `crate::mask`). `output` is the
 /// output's logical rect, the area the image shows.
 ///
-/// Keep mode reads the IPC before and after the copy and accepts the frame
-/// only when both give the same kept regions (one retry), so a window that
-/// moved, opened or closed during the copy cannot leak through a stale plan.
+/// Keep mode captures each kept window on its own where the compositor can
+/// (`crate::wincap`). Otherwise it captures the output, reads the IPC before
+/// and after the copy and accepts the frame only when both give the same plan
+/// (one retry), so a window that moved, opened or closed during the copy
+/// cannot leak through a stale plan.
 fn capture_masked(
     conn: &Conn,
     geom: &OutputGeometry,
@@ -435,31 +480,76 @@ fn capture_masked(
             let rgb = capture_output_rgb(conn, geom)?.0;
             let report = MaskReport {
                 mode: "all",
+                capture: None,
                 kept: Vec::new(),
                 regions: Vec::new(),
+                children: None,
+                children_skipped: None,
             };
             return Ok((apply_keep_mask(&rgb, &[]), Some(report)));
         }
         MaskRequest::Keep(ids) => ids,
     };
-    let toplevels = crate::wm::collect_toplevels(conn)?;
-    let read_plan = || -> Result<mask::Plan> {
+    let kind =
+        crate::ipc::kind().context("masked capture needs the compositor IPC (sway or Hyprland)")?;
+    let avail = wincap::Avail::from_globals(&conn.globals);
+    let upright = geom.transform == Transform::Normal;
+    let path = wincap::select_env(avail, kind, upright)?;
+    // One session per call: binding the toplevel manager a second time on
+    // this connection would give the handles new ids (the `windows` ids are
+    // the first binding's), so the fallback below reuses it.
+    let mut sess = if path != wincap::Path::Output || avail.mapping {
+        Some(wincap::Session::open(
+            conn,
+            path == wincap::Path::Ext,
+            avail,
+        )?)
+    } else {
+        None
+    };
+    // A window buffer that does not match its rect: the output cut, below.
+    if path != wincap::Path::Output
+        && let Some(s) = sess.as_mut()
+        && let Some((rgb, report)) = wincap::capture_keep(conn, s, geom, output, ids, path)?
+    {
+        return Ok((rgb, Some(report)));
+    }
+
+    // Window identity by address where the compositor maps handles to
+    // windows, else by app id + title (`crate::mask`).
+    let (toplevels, by_address) = match &sess {
+        Some(s) => (s.toplevels(), s.by_address()),
+        None => (crate::wm::collect_toplevels(conn)?, false),
+    };
+    let ctx = mask::PlanContext {
+        output,
+        mode: mask::CaptureMode::Output,
+        by_address,
+        children_allowed: false,
+    };
+    let read_plan = |sess: &mut Option<wincap::Session>| -> Result<mask::Plan> {
+        if let Some(s) = sess {
+            s.check_kept_open(ids)?;
+        }
         let snap = crate::ipc::snapshot(true, MASK_IPC_DEADLINE)
             .context("masked capture needs the compositor IPC (sway or Hyprland)")?;
-        mask::plan(&toplevels, ids, &snap)
+        mask::plan(&toplevels, ids, &snap, ctx)
     };
     for _ in 0..2 {
-        let before = read_plan()?;
+        let before = read_plan(&mut sess)?;
         let rgb = capture_output_rgb(conn, geom)?.0;
-        let after = read_plan()?;
-        if before != after {
+        let after = read_plan(&mut sess)?;
+        if !before.same_image(&after, mask::CaptureMode::Output) {
             continue;
         }
         let px = mask::to_pixels(&after.keep, output, rgb.width, rgb.height);
         let report = MaskReport {
             mode: "keep",
+            capture: Some(mask::CaptureMode::Output.as_str()),
             kept: after.kept,
             regions: after.keep,
+            children: None,
+            children_skipped: None,
         };
         return Ok((apply_keep_mask(&rgb, &px), Some(report)));
     }
@@ -566,7 +656,7 @@ pub fn zoom(
 /// Handles the formats wlroots compositors commonly hand out: XRGB8888 /
 /// ARGB8888 (BGRx / BGRA in memory, little-endian) and XBGR8888 / ABGR8888
 /// (RGBx / RGBA). Honours the frame's y-invert flag by reading rows bottom-up.
-fn decode_shm(data: &[u8], fmt: BufferFormat, y_invert: bool) -> Result<RgbImage> {
+pub(crate) fn decode_shm(data: &[u8], fmt: BufferFormat, y_invert: bool) -> Result<RgbImage> {
     let w = fmt.width as usize;
     let h = fmt.height as usize;
     let stride = fmt.stride as usize;

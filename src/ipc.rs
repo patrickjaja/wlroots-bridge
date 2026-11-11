@@ -34,6 +34,37 @@ pub enum Layer {
     Fullscreen,
 }
 
+/// Why a window the IPC lists is not drawn right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hidden {
+    /// On a workspace no output shows (a closed Hyprland special workspace too).
+    OtherWorkspace,
+    /// sway scratchpad, an unmapped Hyprland client.
+    Minimized,
+    /// On a shown workspace but not drawn: a hidden tab or group member, or
+    /// (sway) a window under a fullscreen view.
+    NotDrawn,
+}
+
+impl Client {
+    /// Where a per-window capture of this window is drawn: the client area
+    /// (sway `window_rect`) or the IPC rect.
+    pub fn draw_rect(&self) -> Option<Rect> {
+        self.content.or(self.rect)
+    }
+}
+
+impl Hidden {
+    /// The `kept[].reason` string of the mask report.
+    pub fn reason(self) -> &'static str {
+        match self {
+            Hidden::OtherWorkspace => "other_workspace",
+            Hidden::Minimized => "minimized",
+            Hidden::NotDrawn => "covered",
+        }
+    }
+}
+
 /// One window (view / client) as the IPC reports it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Client {
@@ -44,6 +75,9 @@ pub struct Client {
     pub pid: Option<u32>,
     /// Global logical rect; `None` when the IPC reports no usable size.
     pub rect: Option<Rect>,
+    /// sway: the client's own area inside `rect` (`window_rect`: borders
+    /// excluded), where a per-window capture lands. `None`: `rect` is it.
+    pub content: Option<Rect>,
     /// Output (connector) name of the window's workspace.
     pub output: Option<String>,
     /// Workspace key, unique per compositor (`sway:<name>` / `hypr:<id>`).
@@ -51,11 +85,25 @@ pub struct Client {
     /// Drawn right now (sway `visible`; Hyprland: mapped, not hidden, on an
     /// active or open special workspace of a monitor, or pinned).
     pub visible: bool,
+    /// Set exactly when `visible` is false.
+    pub hidden: Option<Hidden>,
     pub layer: Layer,
     pub xwayland: bool,
+    /// Hyprland window address (`hyprctl -j clients` `address`).
+    pub address: Option<u64>,
+    /// sway `foreign_toplevel_identifier` (sway 1.10+): the
+    /// `ext_foreign_toplevel_handle_v1.identifier` of this view.
+    pub identifier: Option<String>,
     /// Back-to-front hint inside the compositor, higher = closer to the top.
     /// Only the order matters.
     pub stack: i64,
+}
+
+/// A layer-shell surface drawn above windows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Overlay {
+    pub rect: Rect,
+    pub namespace: String,
 }
 
 /// One IPC snapshot.
@@ -65,7 +113,7 @@ pub struct Snapshot {
     pub clients: Vec<Client>,
     /// Surfaces drawn above windows that are not windows: Hyprland layer-shell
     /// surfaces on the `top` and `overlay` levels. sway exposes none.
-    pub overlays: Vec<Rect>,
+    pub overlays: Vec<Overlay>,
     /// Corner radius (logical px) applied to every window (Hyprland
     /// `decoration:rounding`); 0 when none or unknown.
     pub corner_radius: i32,
@@ -109,6 +157,15 @@ fn str_of<'a>(v: &'a Value, k: &str) -> Option<&'a str> {
     v.get(k).and_then(Value::as_str)
 }
 
+/// A Hyprland address string (`0x55d0c1e2f3a0`) as a number.
+pub fn parse_address(s: &str) -> Option<u64> {
+    let hex = s.strip_prefix("0x").unwrap_or(s);
+    if hex.is_empty() {
+        return None;
+    }
+    u64::from_str_radix(hex, 16).ok().filter(|a| *a != 0)
+}
+
 /// Fixed stacking bases: fullscreen above floating above tiled.
 fn layer_base(l: Layer) -> i64 {
     match l {
@@ -133,7 +190,11 @@ pub fn parse_sway(tree: &Value) -> Snapshot {
 #[derive(Default, Clone)]
 struct Ctx {
     output: Option<String>,
+    /// The output's `current_workspace` (the one it shows).
+    current_ws: Option<String>,
     workspace: Option<String>,
+    /// Raw workspace name.
+    ws_name: Option<String>,
     floating: bool,
     /// Index of the top-level floating container in its workspace (draw order).
     float_index: i64,
@@ -154,9 +215,11 @@ fn walk_sway(node: &Value, ctx: &Ctx, out: &mut Vec<Client>) {
             ctx.output = str_of(node, "name")
                 .filter(|n| !n.starts_with("__"))
                 .map(str::to_owned);
+            ctx.current_ws = str_of(node, "current_workspace").map(str::to_owned);
         }
         Some("workspace") => {
             ctx.workspace = str_of(node, "name").map(|n| format!("sway:{n}"));
+            ctx.ws_name = str_of(node, "name").map(str::to_owned);
         }
         _ => {}
     }
@@ -181,19 +244,46 @@ fn walk_sway(node: &Value, ctx: &Ctx, out: &mut Vec<Client>) {
         } else {
             Layer::Tiled
         };
+        let visible = node
+            .get("visible")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let hidden = (!visible).then(|| {
+            if ctx.output.is_none() || ctx.ws_name.as_deref() == Some("__i3_scratch") {
+                Hidden::Minimized
+            } else if ctx.ws_name.is_some() && ctx.ws_name == ctx.current_ws {
+                Hidden::NotDrawn
+            } else {
+                Hidden::OtherWorkspace
+            }
+        });
+        let rect = node.get("rect").and_then(rect_obj);
+        // `window_rect` is relative to `rect`.
+        let content = match (rect, node.get("window_rect").and_then(rect_obj)) {
+            (Some(r), Some(w)) => Some(Rect {
+                x: r.x.saturating_add(w.x),
+                y: r.y.saturating_add(w.y),
+                width: w.width,
+                height: w.height,
+            }),
+            _ => None,
+        };
         out.push(Client {
             app_id: app_id.to_owned(),
             title: str_of(node, "name").unwrap_or_default().to_owned(),
             pid: pid_of(node),
-            rect: node.get("rect").and_then(rect_obj),
+            rect,
+            content,
             output: ctx.output.clone(),
             workspace: ctx.workspace.clone(),
-            visible: node
-                .get("visible")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
+            visible,
+            hidden,
             layer,
             xwayland: shell == Some("xwayland"),
+            address: None,
+            identifier: str_of(node, "foreign_toplevel_identifier")
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned),
             stack: layer_base(layer) + if ctx.floating { ctx.float_index } else { 0 },
         });
     }
@@ -321,16 +411,29 @@ pub fn parse_hypr(
                         .and_then(Value::as_i64)
                         .filter(|n| *n >= 0)
                         .map_or(0, |n| 100_000 - n.min(99_999));
+                    let why = if !mapped {
+                        Some(Hidden::Minimized)
+                    } else if hidden {
+                        Some(Hidden::NotDrawn)
+                    } else if !(on_shown || pinned) {
+                        Some(Hidden::OtherWorkspace)
+                    } else {
+                        None
+                    };
                     Client {
                         app_id: str_of(c, "class").unwrap_or_default().to_owned(),
                         title: str_of(c, "title").unwrap_or_default().to_owned(),
                         pid: pid_of(c),
                         rect,
+                        content: None,
                         output,
                         workspace: ws.map(|id| format!("hypr:{id}")),
-                        visible: mapped && !hidden && (on_shown || pinned),
+                        visible: why.is_none(),
+                        hidden: why,
                         layer,
                         xwayland: c.get("xwayland").and_then(Value::as_bool).unwrap_or(false),
+                        address: str_of(c, "address").and_then(parse_address),
+                        identifier: None,
                         stack: layer_base(layer) + if special { 500_000 } else { 0 } + recency,
                     }
                 })
@@ -355,7 +458,10 @@ pub fn parse_hypr(
                         height: i32_of(l, "h").unwrap_or(0),
                     };
                     if r.width > 0 && r.height > 0 {
-                        overlays.push(r);
+                        overlays.push(Overlay {
+                            rect: r,
+                            namespace: str_of(l, "namespace").unwrap_or_default().to_owned(),
+                        });
                     }
                 }
             }
@@ -412,6 +518,17 @@ fn snapshot_blocking(for_mask: bool) -> Result<Snapshot> {
         ));
     }
     bail!("no window-geometry IPC in this session (only sway and Hyprland are supported)")
+}
+
+/// Which IPC [`snapshot`] reads in this session (sway first, as it does).
+pub fn kind() -> Option<IpcKind> {
+    if sway_socket().is_some() {
+        Some(IpcKind::Sway)
+    } else if hypr_socket().is_some() {
+        Some(IpcKind::Hyprland)
+    } else {
+        None
+    }
 }
 
 /// [`snapshot_blocking`] under a wall-clock limit, so a wedged compositor can
@@ -480,9 +597,10 @@ pub(crate) mod tests {
               {"type":"floating_con","name":"scratch","app_id":"scratchy","pid":5,"shell":"xdg_shell",
                "visible":false,"fullscreen_mode":0,"rect":{"x":10,"y":10,"width":300,"height":200},
                "nodes":[],"floating_nodes":[]}]}]},
-          {"type":"output","name":"HEADLESS-1","rect":{"x":0,"y":0,"width":1280,"height":800},"nodes":[
+          {"type":"output","name":"HEADLESS-1","current_workspace":"1","rect":{"x":0,"y":0,"width":1280,"height":800},"nodes":[
             {"type":"workspace","name":"1","nodes":[
               {"type":"con","name":"Editor","app_id":"org.gnome.TextEditor","pid":100,"shell":"xdg_shell",
+               "foreign_toplevel_identifier":"id-editor",
                "visible":true,"fullscreen_mode":0,"rect":{"x":0,"y":0,"width":640,"height":800},
                "window_rect":{"x":2,"y":2,"width":636,"height":796},"nodes":[],"floating_nodes":[]},
               {"type":"con","name":null,"layout":"tabbed","rect":{"x":640,"y":0,"width":640,"height":800},
@@ -505,12 +623,12 @@ pub(crate) mod tests {
                "fullscreen_mode":0,"rect":{"x":0,"y":0,"width":1280,"height":800},"nodes":[],"floating_nodes":[]}
             ],"floating_nodes":[]}
           ]},
-          {"type":"output","name":"HEADLESS-2","rect":{"x":1280,"y":0,"width":1280,"height":720},"nodes":[
+          {"type":"output","name":"HEADLESS-2","current_workspace":"2","rect":{"x":1280,"y":0,"width":1280,"height":720},"nodes":[
             {"type":"workspace","name":"2","nodes":[
               {"type":"con","name":"Video","app_id":"mpv","pid":600,"shell":"xdg_shell","visible":true,
                "fullscreen_mode":1,"rect":{"x":1280,"y":0,"width":1280,"height":720},"nodes":[],"floating_nodes":[]}
             ],"floating_nodes":[]}]},
-          {"type":"output","name":"HEADLESS-3","rect":{"x":0,"y":800,"width":720,"height":1280},"nodes":[
+          {"type":"output","name":"HEADLESS-3","current_workspace":"3","rect":{"x":0,"y":800,"width":720,"height":1280},"nodes":[
             {"type":"workspace","name":"3","nodes":[
               {"type":"con","name":"Term","app_id":"foot","pid":700,"shell":"xdg_shell","visible":true,
                "fullscreen_mode":0,"rect":{"x":0,"y":800,"width":720,"height":1280},"nodes":[],"floating_nodes":[]}
@@ -549,6 +667,18 @@ pub(crate) mod tests {
         assert!(!by("Hidden").visible);
         assert_eq!(by("Term").output.as_deref(), Some("HEADLESS-3"));
         assert_eq!(s.overlays, vec![]);
+        // Why the invisible ones are not drawn.
+        assert_eq!(by("Mail").hidden, Some(Hidden::NotDrawn), "hidden tab");
+        assert_eq!(by("Hidden").hidden, Some(Hidden::OtherWorkspace));
+        assert_eq!(by("scratch").hidden, Some(Hidden::Minimized));
+        assert_eq!(ed.hidden, None);
+        assert_eq!(ed.identifier.as_deref(), Some("id-editor"));
+        // window_rect is relative to rect: the client area without borders.
+        assert_eq!(ed.content, Some(r(2, 2, 636, 796)));
+        assert_eq!(ed.draw_rect(), Some(r(2, 2, 636, 796)));
+        assert_eq!(by("Docs").content, None);
+        assert_eq!(by("Docs").draw_rect(), Some(r(640, 25, 640, 775)));
+        assert_eq!(by("Docs").identifier, None);
     }
 
     /// Hyprland: DP-1 2560x1440 physical at 0,0 scale 1.5 (1706x960 logical),
@@ -609,8 +739,27 @@ pub(crate) mod tests {
         };
         assert_eq!(s.clients.len(), 8);
         assert_eq!(s.corner_radius, 8);
-        assert_eq!(s.overlays, vec![r(0, 0, 1706, 30), r(1300, 40, 380, 90)]);
+        let ov: Vec<(Rect, &str)> = s
+            .overlays
+            .iter()
+            .map(|o| (o.rect, o.namespace.as_str()))
+            .collect();
+        assert_eq!(
+            ov,
+            vec![
+                (r(0, 0, 1706, 30), "waybar"),
+                (r(1300, 40, 380, 90), "notifications")
+            ]
+        );
+        assert_eq!(s.clients[0].address, Some(1));
+        assert_eq!(parse_address("0x55d0c1e2f3a0"), Some(0x55d0_c1e2_f3a0));
+        assert_eq!(parse_address("0x"), None);
+        assert_eq!(parse_address("zz"), None);
+        assert_eq!(by("firefox", "Mail").hidden, Some(Hidden::NotDrawn));
+        assert_eq!(by("code", "Project").hidden, Some(Hidden::OtherWorkspace));
+        assert_eq!(by("ghost", "").hidden, Some(Hidden::Minimized));
         let k = by("kitty", "~");
+        assert_eq!(k.hidden, None);
         assert_eq!(k.rect, Some(r(10, 40, 840, 910)));
         assert_eq!(k.output.as_deref(), Some("DP-1"));
         assert!(k.visible);

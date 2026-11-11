@@ -22,9 +22,12 @@ JSON contract**, so the JS executor treats them interchangeably.
 ## Technology (pure Rust, Smithay ecosystem)
 
 `wayland-client` (its `client_rust` backend - **no libwayland**),
-`wayland-protocols` (`xdg_output`, `ext_foreign_toplevel_list`),
+`wayland-protocols` (`xdg_output`, `ext_foreign_toplevel_list`,
+`ext_image_copy_capture`, `ext_image_capture_source`),
 `wayland-protocols-wlr` (`virtual_pointer`, `screencopy`, `foreign_toplevel`),
-`wayland-protocols-misc` (`virtual_keyboard`). Plus `image` (JPEG), `xkeysym`,
+`wayland-protocols-misc` (`virtual_keyboard`), and `wayland-scanner` for the
+Hyprland protocols vendored in `protocols/` (`hyprland-toplevel-export-v1`,
+`hyprland-toplevel-mapping-v1`, from hyprland-protocols 0.8.0, BSD-3-Clause). Plus `image` (JPEG), `xkeysym`,
 `clap`, `serde`/`serde_json`, `base64`, `anyhow`. **No libxkbcommon** - the XKB
 keymap the virtual keyboard needs is generated as text and compiled by the
 compositor (see [Keymap generation](#keymap-generation)). The result is a fully
@@ -298,29 +301,208 @@ keep the protocol-only answer (`geometry` `{0,0,0,0}`, `output` null).
 
 ## Mask mode (`screenshot` / `zoom`)
 
-`--keep-window <id>` (repeatable; ids from `windows`) keeps the visible parts of
-those windows and paints everything else #1E1E1E: desktop, bars, other windows,
-Claude's own window. `--mask-all` paints the whole image (no IPC needed). The
-result gains `mask: {mode: "keep"|"all", kept: [{id, appId, title, visible}],
-regions: [{x,y,width,height}]}` so the caller can check every kept id still
-named the window it listed (ids are per-connection protocol ids and can shift
-when a window opens or closes in between).
+`--keep-window <id>` (repeatable; ids from `windows`) produces an image that
+shows the kept windows and nothing else: desktop, bars, notifications, other
+windows and Claude's own window are #1E1E1E. `--mask-all` paints the whole
+image (no IPC needed). The result gains
+`mask: {mode: "keep"|"all", capture?, kept: [...], regions: [{x,y,width,height}]}`.
+`kept[]` echoes `{id, appId, title, pid, visible}` (app id, title and process
+id as the compositor IPC reports them in the snapshot the plan uses, never the
+`windows`-time data; `pid` is null when the compositor gives none or the id
+does not resolve to exactly one IPC window) so the caller can check every kept
+id still names the window it listed, also among windows that share an app id. Window ids are positional: they are the
+per-connection protocol ids of the foreign-toplevel handles, assigned in the
+order the compositor announces its windows. Hyprland announces them in its
+window list order, which changes when focus changes, and an id is recycled
+when a window closes. The caller must list `windows` right before a masked
+call (no input in between) and check `kept[].appId` and `kept[].pid`. Plus:
 
-A kept window's region is its IPC rect minus every other visible window that
-may be above it (only a tiled window on the same workspace under a floating or
-fullscreen kept window is known to be below; floating-over-floating is always
-cut), minus Hyprland layer surfaces on the `top`/`overlay` levels, minus the
-four `decoration:rounding` corner squares on Hyprland. The regions are mapped
-onto the captured image, which is already in logical orientation (the output
-transform is undone first), with exact integer math, rounding kept areas
-inward, so a partly covered pixel is masked (1.25/1.5 scales included).
+- `shown`: its pixels are in the image;
+- `reason` when not shown: `other_workspace` (also a closed Hyprland special
+  workspace), `minimized` (sway scratchpad, an unmapped Hyprland client, a
+  toplevel in the minimized state), `other_output` (drawn, but not on the
+  captured output), `covered` (output mode: the cut left nothing; both modes:
+  on a shown workspace but not drawn - a hidden tab or group member, on sway
+  a window under a fullscreen view);
+- `coveredBy`: app ids (`unknown` without one) of other windows and
+  `layer:<namespace>` of Hyprland top/overlay layer surfaces whose rect meets
+  the window's and that may be above it.
+
+Toplevel mode adds `children: [{address, pid, parent, rect}]` (the drawn
+override-redirect XWayland windows, `parent` = the kept id they belong to)
+and `childrenSkipped` (a count; nothing else about them is reported).
+
+Keep mode needs the sway or Hyprland IPC (`src/ipc.rs`) and has two ways to
+make the image. `mask.capture` and `doctor.screenshot_mask_mode` say which.
+
+### Toplevel capture (`capture: "toplevel"`, `src/wincap.rs`, Hyprland)
+
+Each kept window that the Hyprland IPC reports drawn on the captured output
+(mapped, not a hidden group member, on a shown workspace or pinned) is
+captured on its own and drawn back to front (IPC stacking) onto a #1E1E1E
+canvas the size of the output image, at its client area (`at`/`size`).
+`regions` are these areas. Per-window capture renders the window's own
+surface tree into a buffer cleared to transparent: no layer surfaces, no
+other windows, no cursor, no border, shadow, rounding, blur or compositor
+opacity (Hyprland renders the window "standalone": `renderdata.blur` and the
+compositor alphas are forced off, both protocols go through
+`CScreenshareFrame::renderWindow`). Client alpha is blended over the canvas
+(premultiplied); measured on Hyprland 0.56.2 with a half-transparent client
+over a high-contrast window and over the wallpaper, blur on/off, xray on/off,
+`new_optimizations` on/off and compositor opacity 0.6: the exported pixels
+are identical either way. A kept window that something covers on screen is
+shown whole, `coveredBy` naming what covers it, and the caller's hit test
+still refuses clicks there; this includes a tiled kept window under another
+window's fullscreen view, which Hyprland reports as on a shown workspace. A
+kept window that is not drawn in that sense (other workspace, closed special
+workspace, hidden group member, unmapped, minimized, other output) is never
+captured: the compositor would render a window on an inactive workspace if
+asked, so the IPC visibility gate decides.
+
+Protocols, in order of preference (`wincap::select`):
+
+1. `ext_image_copy_capture_manager_v1` with an
+   `ext_foreign_toplevel_image_capture_source_manager_v1` source built from an
+   `ext_foreign_toplevel_handle_v1` (Hyprland 0.54+);
+2. `hyprland_toplevel_export_manager_v1` v2,
+   `capture_toplevel_with_wlr_toplevel_handle` (Hyprland, also before 0.54),
+   on an upright output only: its buffer carries no transform, so a rotated or
+   flipped output takes ext or the output cut;
+3. otherwise the output cut below. sway always takes the output cut (see
+   Future work).
+
+**`WLROOTS_BRIDGE_MASK_CAPTURE`** (environment of the bridge process; not in
+`--help`) picks the keep-mode path:
+
+- unset or empty: the default above;
+- `output`: the output cut, always allowed (the workaround when per-window
+  capture fails on a Hyprland setup);
+- `ext`: per-window ext capture (also reaches the sway ext path);
+- `hyprland`: the Hyprland export (Hyprland only, upright outputs only).
+
+Values are exact and lower-case. Any other value, or a path this compositor
+or output cannot use, makes every masked `screenshot` / `zoom` fail closed
+(exit 1, the error names `WLROOTS_BRIDGE_MASK_CAPTURE`); it never disables
+masking and never yields an unmasked image. `doctor` then still reports
+`screenshot_mask: true`, with `screenshot_mask_mode` and
+`screenshot_mask_protocol` null. Unmasked captures ignore the variable.
+`doctor` reports the path for an upright output.
+`WLROOTS_BRIDGE_MASK_DEBUG=1` prints stderr lines per drawn window (rect,
+buffer size, placement), per plan read and per settle retry.
+
+Which handle captures a kept IPC window: the window address from
+`hyprland_toplevel_mapping_v1` where it is advertised (wlr and ext handles both
+map to the address `hyprctl -j clients` reports); else, ext handles only, sway's
+`foreign_toplevel_identifier` from `GET_TREE` (= the ext handle's
+`identifier`); else app id + title, which must be unique among the IPC windows
+and name exactly one open handle. The same mapping decides which IPC window a
+kept id is, in both modes, so two windows with the same app id and title can be
+kept apart where the mapping protocol is advertised (verified on Hyprland
+0.56.2). Without it, keeping two windows with the same app id and title is
+refused in toplevel mode (no handle can be told apart). Matching by address
+also requires the IPC window's class to equal the handle's app id (an address
+is reused after a window closes), and before every IPC read the bridge
+dispatches pending events and refuses when a kept handle has closed.
+
+Placement: the origin is the client area's origin times the output's
+pixel/logical ratio, rounded half up (as the compositor rounds a scaled box).
+Hyprland delivers the window at its current size times the output scale,
+rounded, so the buffer is drawn 1:1 when its size lies within one pixel of the
+area's inward- and outward-rounded pixel size (no resampling at 1.25/1.5;
+measured: a 1261 px wide window at 1.5 gives a 1892 px buffer, a floating GTK4
+dialog with client-side decorations gives exactly its window geometry). A
+buffer outside that range, or an ext frame that fails with
+`buffer_constraints`, means the window is still resizing or animating (the IPC
+reports the goal, the buffer the current size). Resampling would put pixels
+where clicks do not land, so the bridge waits 80 ms (`SETTLE_STEP`) and starts
+the attempt over (new plan, new captures, the same before/after check), for
+up to 800 ms from the first mismatch (`SETTLE_MAX`; Omarchy's longest window
+animation is `windowsIn` at 410 ms) and never past the 4 s capture budget.
+Only a window that still does not match then makes the whole call fall back
+to the output cut (`capture:"output"`). One debug line per retry and one when
+it gives up. A plan that changes between before and after still gets one more
+attempt and is then refused, as before. An ext frame's `transform` is undone first. `zoom`
+crops the composed canvas exactly as it crops an output capture, so its
+region and click coordinates are unchanged.
+
+Window buffers are validated before allocation: each side positive and at
+most four times the output image's long side (at most 32768), a stride of
+`4 * width` to `4 * width + 1024`, and `stride * height` within a wl_shm pool.
+
+XWayland override-redirect windows (menus, dropdowns, tooltips) are not
+toplevels and plain per-window capture loses them. On Hyprland they are IPC
+clients with the pid of the X client connection that created them: Hyprland
+0.56 reads it once per X window through the X Resource extension
+(`xcb_res_query_client_ids`, `XCB_RES_CLIENT_ID_MASK_LOCAL_CLIENT_PID`,
+`src/xwayland/XSurface.cpp`), not from the `_NET_WM_PID` property (verified:
+`xprop -set _NET_WM_PID` on another client's window does not change the pid
+`hyprctl` reports). Without XRes the pid is unknown and nothing is attributed.
+One process often owns windows of several apps (LibreOffice, a browser and its
+web apps, Wine), so such a window is drawn only when:
+
+- it is visible, XWayland, without a class (X11 menus, dropdowns and
+  tooltips carry no `WM_CLASS`; Hyprland's IPC has no override-redirect
+  flag, so this is the IPC-side signal), on the captured output, and no
+  toplevel handle names it;
+- a drawn kept XWayland window has its pid, and its rect meets or touches
+  that kept window's area (`parent`);
+- every other IPC window of that pid, on any workspace, visible or not, is
+  kept or is itself such a child-like window.
+
+Otherwise it is skipped and counted in `childrenSkipped`. No child at all is
+drawn in an attempt whose toplevel handle list may be stale: a toplevel
+appeared after the handle list was taken, or (identity by address) an open
+handle has no address. A window with a class is never a child, so a new
+window of the same process blocks the children instead of being drawn. Drawn ones are
+exported by window address (`hyprland_toplevel_export_manager_v1.capture_toplevel`,
+low 32 bits of the address, refused when two windows share them) and listed in
+`children`. X11 itself does not isolate clients: any X client can draw into
+another client's window, which no compositor-side attribution can see.
+
+Fail closed, no image: no IPC, an unknown id or a kept window without an
+unambiguous IPC match or capture handle, an address whose window is now
+another app, a kept handle that closed, a visible window without geometry,
+a capture the compositor fails or stops, a buffer format other than 8-bit RGB
+(`XRGB8888`, `ARGB8888`, `XBGR8888`, `ABGR8888`; 10-bit formats are refused
+with the offered list), a buffer outside the limits above, no frame within the
+4 s budget shared by all windows of the call (Hyprland holds frames while a
+screencopy permission is pending under `ecosystem:enforce_permissions`), and
+a plan that differs before and after the captures (one retry). The comparison
+covers what decides the image: each drawn window's identity (address /
+identifier), app id, rect, visibility and hidden reason, workspace and output,
+the draw order, the kept regions and per-window verdicts; titles and focus
+recency that does not reorder the drawn windows do not count. A kept window
+that is not drawn is reported, not captured; a result where no kept window is
+shown is a well-formed all-#1E1E1E image whose `kept[]` says why.
+
+What the image can contain besides the kept windows' own surfaces: their
+xdg_popups inside the window (clipped at the window box:
+`popups_outside_window` in `doctor.screenshot_mask_gaps`) and the drawn
+override-redirect children above. Windows, layer surfaces and popups of
+other apps are not captured; the one exception left is X11's own lack of
+isolation above (`xwayland_unmanaged` is listed where children cannot be
+attributed at all).
+
+### Output cut (`capture: "output"`)
+
+The composited output is captured and everything but the kept windows'
+visible regions is painted over. A kept window's region is its IPC rect minus
+every other visible window that may be above it (only a tiled window on the
+same workspace under a floating or fullscreen kept window is known to be
+below; floating-over-floating is always cut), minus Hyprland layer surfaces on
+the `top`/`overlay` levels, minus the four `decoration:rounding` corner squares
+on Hyprland. The regions are mapped onto the captured image, which is already
+in logical orientation (the output transform is undone first), with exact
+integer math, rounding kept areas inward, so a partly covered pixel is masked
+(1.25/1.5 scales included). `regions` are these cut regions; a kept window
+whose cut leaves nothing on the captured output is `shown:false`,
+`reason:"covered"` with its `coveredBy` (for example Omarchy's notification
+host, a transparent full-output `omarchy-notifications` overlay layer while any
+notification shows).
 
 The IPC is read before and after the copy; the frame is used only when both
-give the same plan (one retry). Fails closed, no image: no IPC, an unknown id,
-a kept window that shares its app id + title with a window that is not kept, a
-kept window with no unambiguous IPC match, or a visible window with no
-geometry. A kept window that is not visible keeps nothing (fully masked image,
-`visible:false`).
+give the same plan (one retry). Fails closed as above. A kept window that is
+not visible keeps nothing.
 
 Not masked when drawn over a kept window (`doctor.screenshot_mask_gaps`):
 popups/menus of any app (not in either IPC), on sway also layer-shell
@@ -363,8 +545,13 @@ The bridge implements the Computer Use bridge CLI contract v1
   runtime binding API.
 - Additive `doctor` keys: `window_geometry` (sway/Hyprland IPC answered and a
   foreign-toplevel protocol is advertised), `screenshot_mask` (`window_geometry`,
-  the full mask IPC read succeeded and screencopy is advertised) and
-  `screenshot_mask_gaps` (see "Mask mode"). All false/empty elsewhere.
+  the full mask IPC read succeeded and screencopy is advertised),
+  `screenshot_mask_mode` (`"toplevel"` | `"output"`), `screenshot_mask_protocol`
+  (`"ext-image-copy-capture-v1"` | `"hyprland-toplevel-export-v1"` | null) and
+  `screenshot_mask_gaps` (see "Mask mode"; they follow
+  `WLROOTS_BRIDGE_MASK_CAPTURE`). All false/empty/null elsewhere. `globals`
+  also lists `image_copy_capture`, `toplevel_capture_source`,
+  `hyprland_toplevel_export` and `hyprland_toplevel_mapping`.
 - Every coordinate flag accepts negative values (layouts can start left of or
   above the origin).
 - `tests/contract.rs` runs these checks against the binary without a compositor.
@@ -614,9 +801,16 @@ satisfy the JS session bookkeeping. The single stateful exception is the
 
 ## Future work
 
-- **`ext_image_copy_capture`**: some compositors advertise it alongside (or
-  instead of) `wlr-screencopy`. v0.1 only implements `wlr-screencopy` (Sway,
-  Hyprland, and Niri all ship it). Adding the ext protocol would broaden
-  compositor coverage.
+- **Per-window capture on sway.** sway 1.12 advertises the ext protocols and
+  the path works behind `WLROOTS_BRIDGE_MASK_CAPTURE=ext`, but it is not the
+  default: sway's toplevel capture source returns the whole surface tree
+  without a geometry offset (a floating GTK4 dialog's client-side shadow and an
+  open combo popup enlarge the buffer, so the window no longer lands on its
+  rect) and renders at scale 1, so text on a scaled output is upscaled. On
+  that path the buffer is drawn at the client area (`rect` + `window_rect`),
+  scaled (nearest neighbour) when its size differs.
+- **`ext_image_copy_capture` for whole outputs**: masked keep mode uses it per
+  window; plain screenshots and the output cut still use `wlr-screencopy`
+  (Sway, Hyprland and Niri all ship it).
 - **GNOME-Wayland** is covered by a separate `gnome-portal-bridge` (in
   development), not this binary.

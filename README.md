@@ -45,6 +45,13 @@ The compositor must advertise the wlroots protocol extensions this bridge binds:
   that advertise only the ext protocol
 - `zxdg_output_manager_v1` (logical output geometry)
 
+Masked screenshots (`--keep-window`) on Hyprland capture each kept window on
+its own: `ext_image_copy_capture_manager_v1` +
+`ext_foreign_toplevel_image_capture_source_manager_v1` (Hyprland 0.54+) or
+`hyprland_toplevel_export_manager_v1` v2. On sway they cut the composited
+output. `doctor` reports which (`screenshot_mask_mode`,
+`screenshot_mask_protocol`).
+
 Sway, Hyprland, and **Niri all advertise the wlr protocols above** (including
 the wlr foreign-toplevel manager with `activate` - verified against niri's
 source), so window activation works on all three. Niri additionally gates these
@@ -55,7 +62,8 @@ Run `wlroots-bridge doctor` to see what the running compositor advertises (see
 ## Portability (static musl, incl. NixOS)
 
 `wlroots-bridge` is **pure Rust with zero C dependencies** - it uses
-`wayland-client`'s `client_rust` backend (no `libwayland`), generates its XKB
+`wayland-client`'s `client_rust` backend (no `libwayland`; the Hyprland
+protocol XML it uses is vendored in `protocols/` and compiled in), generates its XKB
 keymap text itself (no `libxkbcommon`), and uses the `image` crate for JPEG. It
 builds as a **fully static musl binary** linked with `rust-lld`, so there is no
 external cross-linker and no runtime library dependency at all. The same binary
@@ -114,7 +122,7 @@ failure it prints a message to stderr and exits 1 (clap parse errors exit 2).
 | `doctor` | Contract v1 report (always exit 0) + Wayland env and advertised globals |
 | `screens` | Enumerate outputs (wl_output + xdg-output) |
 | `windows` | Enumerate windows (foreign-toplevel; geometry/output/visibility from sway or Hyprland IPC) |
-| `screenshot [--display N] [--keep-window ID]... [--mask-all]` | Capture a full monitor; mask mode paints all but the kept windows #1E1E1E (sway/Hyprland) |
+| `screenshot [--display N] [--keep-window ID]... [--mask-all]` | Capture a full monitor; mask mode shows only the kept windows on #1E1E1E (sway/Hyprland) |
 | `zoom --display N --x --y --w --h [--keep-window ID]... [--mask-all]` | Capture a region within a monitor (same mask mode) |
 | `pointer-move` / `-click` / `-scroll` / `-drag` | Pointer actions (virtual pointer) |
 | `left-mouse-down` / `left-mouse-up` | Press/release-and-hold the left button |
@@ -216,4 +224,6 @@ path for `js/cu_linux_executor.js` to call.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE). The vendored Hyprland protocol files in
+`protocols/` are BSD-3-Clause (hyprland-protocols); see
+[THIRD-PARTY.md](THIRD-PARTY.md).

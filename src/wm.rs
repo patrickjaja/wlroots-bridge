@@ -43,9 +43,12 @@ pub(crate) struct Toplevel {
     pub(crate) app_id: Option<String>,
     pub(crate) title: Option<String>,
     activated: bool,
-    minimized: bool,
+    pub(crate) minimized: bool,
     /// Order the compositor announced this toplevel (used for stacking_order).
     order: usize,
+    /// Hyprland window address from `hyprland_toplevel_mapping_v1`, set only
+    /// by the masked capture (`crate::wincap`).
+    pub(crate) address: Option<u64>,
 }
 
 #[cfg(test)]
@@ -61,6 +64,14 @@ impl Toplevel {
 }
 
 impl Toplevel {
+    /// An empty toplevel with this id (state filled in from events).
+    pub(crate) fn with_id(id: String) -> Self {
+        Toplevel {
+            id,
+            ..Default::default()
+        }
+    }
+
     fn to_window_info(&self) -> WindowInfo {
         let app_id = self.app_id.clone().filter(|s| !s.trim().is_empty());
         WindowInfo {
@@ -482,6 +493,7 @@ mod tests {
             activated,
             minimized,
             order: 0,
+            address: None,
         }
     }
 

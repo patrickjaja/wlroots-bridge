@@ -232,6 +232,13 @@ pub struct DoctorReport {
     /// Additive: what a masked capture cannot see and so leaves unmasked when
     /// drawn over a kept window (empty when `screenshot_mask` is false).
     pub screenshot_mask_gaps: Vec<&'static str>,
+    /// Additive: how keep mode makes the image, `"toplevel"` (each kept
+    /// window captured on its own) or `"output"` (composited output + cut);
+    /// null when `screenshot_mask` is false.
+    pub screenshot_mask_mode: Option<&'static str>,
+    /// Additive: the per-window capture protocol in toplevel mode
+    /// (`"ext-image-copy-capture-v1"` | `"hyprland-toplevel-export-v1"`), else null.
+    pub screenshot_mask_protocol: Option<&'static str>,
     /// Additive (optional contract addition): whether `abort-watch` would arm here.
     #[serde(rename = "abortWatch")]
     pub abort_watch: serde_json::Value,
@@ -250,4 +257,8 @@ pub struct DoctorGlobals {
     pub wl_output_count: usize,
     pub wl_seat: Option<u32>,
     pub wl_shm: Option<u32>,
+    pub image_copy_capture: Option<u32>,
+    pub toplevel_capture_source: Option<u32>,
+    pub hyprland_toplevel_export: Option<u32>,
+    pub hyprland_toplevel_mapping: Option<u32>,
 }

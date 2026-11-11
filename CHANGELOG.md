@@ -8,6 +8,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Masked screenshots capture each kept window on its own on Hyprland**
+  (`ext_image_copy_capture_v1` with a foreign-toplevel source on 0.54+, else
+  `hyprland_toplevel_export_v1` v2 on an upright output): the kept windows are
+  drawn back to front at their IPC rects on #1E1E1E, with no layer,
+  rounded-corner or occluder cut. A notification, bar or other window over a
+  kept window is no longer in the image and no longer erases it (on Omarchy
+  any notification made the whole image #1E1E1E). A covered kept window,
+  including a tiled one under another window's fullscreen view, is shown
+  whole. Kept windows on another workspace or output, hidden group members,
+  unmapped or minimized ones are never captured. Menus and dropdowns of a kept
+  X11 app are drawn when the app's process has no window that is not kept and
+  they touch the kept window. A buffer that does not match its window's size
+  (a window still animating) is captured again every 80 ms for up to 800 ms;
+  only then does the call use the output cut. sway keeps the output cut. Fails closed
+  as before, plus on a capture failure, a reused window address, a closed kept
+  window, a 10-bit or out-of-range buffer, or no frame within 4 s.
+- **Mask report.** `mask.capture` (`toplevel` | `output`); per kept window
+  `shown`, `reason` (`other_workspace`, `minimized`, `other_output`, `covered`)
+  and `coveredBy` (app ids, `layer:<namespace>`), in both modes; `appId` and
+  `title` as the compositor reports them now, and `pid` from the same
+  snapshot; toplevel mode adds `children` and `childrenSkipped`. Kept windows resolve by Hyprland window address where
+  `hyprland_toplevel_mapping_v1` is advertised, so same-titled windows of one
+  app can be kept apart.
+- **`doctor`**: `screenshot_mask_mode`, `screenshot_mask_protocol`, toplevel
+  gap `popups_outside_window`, and the four capture globals under `globals`.
 - **Injected keys use their real key codes.** The virtual keyboard's keymap
   puts every key that has a US pc105 position there (Escape on KEY_ESC,
   Control on KEY_LEFTCTRL, letters, digits, named keys) and the rest on

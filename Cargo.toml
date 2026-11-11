@@ -22,6 +22,10 @@ wayland-client = "0.31.14"
 wayland-protocols = { version = "0.32.12", features = ["client", "staging", "unstable"] }
 wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
 wayland-protocols-misc = { version = "0.3.12", features = ["client"] }
+# Client code for the vendored Hyprland protocol XML in protocols/ (build time
+# only; `bitflags` is what the generated code uses for bitfield enums).
+wayland-scanner = "0.31.10"
+bitflags = "2.13.0"
 
 [profile.release]
 strip = true
