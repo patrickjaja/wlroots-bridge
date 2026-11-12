@@ -201,9 +201,10 @@ dependencies = [
 [[package]]
 name = "cu-atspi"
 version = "0.1.0"
-source = "git+https://github.com/patrickjaja/cu-atspi?rev=a390259e9209fda8bb518a8ef253198ba3435ef0#a390259e9209fda8bb518a8ef253198ba3435ef0"
+source = "git+https://github.com/patrickjaja/cu-atspi?rev=36f727a105dd745f0f6458cb050aa0a3f870e61b#36f727a105dd745f0f6458cb050aa0a3f870e61b"
 dependencies = [
  "atspi-common",
+ "clap",
  "futures-util",
  "serde",
  "serde_json",

@@ -138,6 +138,7 @@ instead (one object per line, see their sections).
 | `cursor-position` | Unsupported on Wayland (exits 1) |
 | `activate-window --window <id>` | Raise + focus a window (wlr foreign-toplevel; works on Sway/Hyprland/Niri) |
 | `session-start` / `session-end` / `forget-session` | No-ops (`session-start` -> `{"ok":true,"session":"noop"}`; the others report `ended:false, daemon:"none"`) |
+| `ax-find` / `ax-action` / `ax-enable` / `ax-restore` / `ax-features` | Optional accessibility (AT-SPI) commands from the contract; `ax-features` prints the implemented feature list (JSON) and needs no session |
 | `abort-watch` | Long-running Escape watcher (optional contract addition, sway and Hyprland): JSON lines on stdout, `suspend` / `resume` on stdin |
 | `overlay` | Long-running Computer Use glow + drawn cursor on a click-through layer surface (optional contract addition, any compositor with wlr-layer-shell): JSON lines both ways |
 

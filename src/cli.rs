@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -9,15 +9,6 @@ use clap::{Parser, Subcommand, ValueEnum};
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
-}
-
-/// `ax-action --action` values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum AxActionKind {
-    Click,
-    Focus,
-    /// Text comes from stdin (UTF-8, whole stdin, no trimming).
-    SetText,
 }
 
 #[derive(Debug, Subcommand)]
@@ -179,32 +170,161 @@ pub enum Command {
     AxFind {
         #[arg(long)]
         window: String,
-        #[arg(long)]
-        role: Option<String>,
-        #[arg(long)]
-        title_contains: Option<String>,
-        #[arg(long)]
-        all: bool,
-        #[arg(long)]
-        include_hidden: bool,
-        #[arg(long)]
-        max_nodes: Option<usize>,
-        #[arg(long)]
-        max_depth: Option<u32>,
         /// app id the caller listed for this window; a mismatch yields `window_changed`.
         #[arg(long)]
         expect_app_id: Option<String>,
-        /// title the caller listed for this window; a mismatch yields `window_changed`.
+        /// title the caller listed for this window; a mismatch yields `window_changed`
+        /// (not when `--window-ref` was used and `--expect-app-id` matches).
         #[arg(long)]
         expect_title: Option<String>,
+        #[command(flatten)]
+        ax: cu_atspi::cli::AxFindFlags,
     },
-    /// Act on an element returned by `ax-find` (click, focus, set-text via stdin).
+    /// Act on an element returned by `ax-find` (click, focus, set-text, ensure-*,
+    /// scroll-to, set-value; text and expectations via stdin).
     AxAction {
-        #[arg(long)]
-        scope: String,
-        #[arg(long = "ref")]
-        element_ref: String,
-        #[arg(long, value_enum)]
-        action: AxActionKind,
+        #[command(flatten)]
+        ax: cu_atspi::cli::AxActionFlags,
     },
+    /// Print the accessibility features this build implements (JSON). Opens no
+    /// compositor, D-Bus or session connection.
+    AxFeatures,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cu_atspi::Action;
+
+    fn parse(args: &[&str]) -> Result<Command, clap::Error> {
+        Cli::try_parse_from(std::iter::once("wlroots-bridge").chain(args.iter().copied()))
+            .map(|c| c.command)
+    }
+
+    fn usage(args: &[&str]) {
+        assert_eq!(parse(args).unwrap_err().exit_code(), 2, "{args:?}");
+    }
+
+    #[test]
+    fn ax_find_old_flag_sets_parse() {
+        let Command::AxFind {
+            window,
+            expect_app_id,
+            expect_title,
+            ax,
+        } = parse(&[
+            "ax-find",
+            "--window",
+            "7",
+            "--role",
+            "AXButton",
+            "--title-contains",
+            "ok",
+            "--all",
+            "--include-hidden",
+            "--max-nodes",
+            "50",
+            "--max-depth",
+            "6",
+            "--expect-app-id",
+            "foot",
+            "--expect-title",
+            "t",
+        ])
+        .unwrap()
+        else {
+            panic!("not ax-find")
+        };
+        assert_eq!(window, "7");
+        assert_eq!(expect_app_id.as_deref(), Some("foot"));
+        assert_eq!(expect_title.as_deref(), Some("t"));
+        assert_eq!(ax.role.as_deref(), Some("AXButton"));
+        assert!(ax.all && ax.include_hidden);
+        assert_eq!((ax.max_nodes, ax.max_depth), (Some(50), Some(6)));
+        assert!(parse(&["ax-find", "--window", "7"]).is_ok());
+    }
+
+    #[test]
+    fn ax_find_new_flags_and_usage_errors() {
+        let Command::AxFind { ax, .. } = parse(&[
+            "ax-find",
+            "--window",
+            "1",
+            "--window-ref",
+            "r",
+            "--deadline-ms",
+            "300",
+            "--root-ref",
+            "x",
+            "--scope",
+            "s",
+            "--skeleton",
+        ])
+        .unwrap() else {
+            panic!()
+        };
+        assert!(ax.skeleton);
+        assert_eq!(ax.window_ref.as_deref(), Some("r"));
+        usage(&["ax-find", "--window", "1", "--root-ref", "x"]);
+        usage(&[
+            "ax-find",
+            "--window",
+            "1",
+            "--skeleton",
+            "--role",
+            "AXButton",
+        ]);
+        usage(&["ax-find"]);
+    }
+
+    #[test]
+    fn ax_action_kinds_parse() {
+        for (arg, ok) in [
+            ("click", true),
+            ("focus", true),
+            ("set-text", true),
+            ("ensure-checked", true),
+            ("scroll-to", true),
+            ("set-value", true),
+            ("bogus", false),
+        ] {
+            let r = parse(&["ax-action", "--scope", "s", "--ref", "r", "--action", arg]);
+            assert_eq!(r.is_ok(), ok, "{arg}");
+        }
+        let Command::AxAction { ax } = parse(&[
+            "ax-action",
+            "--scope",
+            "s",
+            "--ref",
+            "r",
+            "--action",
+            "scroll-to",
+        ])
+        .unwrap() else {
+            panic!()
+        };
+        assert_eq!(
+            ax.request(false, &b""[..]).unwrap().action,
+            Action::ScrollTo
+        );
+        let Command::AxAction { ax } = parse(&[
+            "ax-action",
+            "--scope",
+            "s",
+            "--ref",
+            "r",
+            "--action",
+            "set-value",
+        ])
+        .unwrap() else {
+            panic!()
+        };
+        assert!(ax.request(false, &b"1"[..]).unwrap_err().is_usage());
+    }
+
+    #[test]
+    fn ax_features_takes_no_flags() {
+        assert!(matches!(parse(&["ax-features"]), Ok(Command::AxFeatures)));
+        usage(&["ax-features", "--x"]);
+    }
 }

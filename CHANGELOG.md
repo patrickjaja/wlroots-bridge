@@ -8,6 +8,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Accessibility commands use the shared `cu-atspi` flags** (36f727a):
+  `ax-find` and `ax-action` gain the crate's features (window refs, deadline,
+  root and skeleton walks, `--expect-json`, `ensure-*`, `scroll-to`,
+  `set-value`), and `ax-features` prints the feature list without opening any
+  connection. `doctor.atspi` carries `features`. With `--window-ref` used and
+  `--expect-app-id` matching, a changed title is not `window_changed`; the app
+  id check is never relaxed.
 - **The overlay draws its text badge** (`cu-overlay` e1f1a91): `ready` reports
   `"badge": true` and `show` accepts `badgeText`. The binary embeds a Noto Sans
   subset (OFL 1.1, see THIRD-PARTY.md).

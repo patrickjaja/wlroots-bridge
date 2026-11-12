@@ -292,3 +292,15 @@ fn ax_action_click_without_bus_is_unavailable_exit_zero() {
     assert_eq!(out.status.code(), Some(0));
     assert!(stdout_json(&out)["unavailable"].is_string());
 }
+
+#[test]
+fn ax_features_prints_the_crates_list_without_a_session() {
+    // No Wayland display, no D-Bus: must still succeed.
+    let out = run(&["ax-features"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        stdout_json(&out),
+        serde_json::json!({ "ax_features": cu_atspi::features() })
+    );
+    assert_eq!(cu_atspi::features().len(), 13);
+}

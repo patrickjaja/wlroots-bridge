@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use cu_atspi::{FindRequest, Rect, WindowHint};
+use cu_atspi::{Rect, WindowHint};
 use serde_json::{Value, json};
 
 use crate::conn::Conn;
@@ -25,18 +25,12 @@ use crate::conn::Conn;
 pub(crate) const IPC_TIMEOUT: Duration = Duration::from_millis(1500);
 /// Overall budget for one IPC exchange, connect included.
 pub(crate) const IPC_DEADLINE: Duration = Duration::from_millis(1500);
-/// Largest accepted `set-text` payload on stdin.
-pub const MAX_STDIN_TEXT: usize = 16 << 20;
 
-/// `ax-find` flags after the window id is resolved.
+/// `ax-find` flags after the window id is resolved: the shared crate flags
+/// plus this bridge's own `--expect-*` checks.
 #[derive(Debug, Default)]
 pub struct FindOptions {
-    pub role: Option<String>,
-    pub title_contains: Option<String>,
-    pub all: bool,
-    pub include_hidden: bool,
-    pub max_nodes: Option<usize>,
-    pub max_depth: Option<u32>,
+    pub flags: cu_atspi::cli::AxFindFlags,
     pub expect_app_id: Option<String>,
     pub expect_title: Option<String>,
 }
@@ -319,7 +313,14 @@ pub fn doctor_atspi() -> Value {
     let mut v = with_deadline(DOCTOR_ATSPI_BUDGET, || {
         serde_json::to_value(cu_atspi::blocking::doctor()).ok()
     })
-    .unwrap_or_else(|| json!({"bus": false, "error": "accessibility doctor timed out"}));
+    .unwrap_or_else(|| {
+        // Keeps `features` (and the other defaults) on the timeout fallback.
+        serde_json::to_value(cu_atspi::AtspiDoctor {
+            error: Some("accessibility doctor timed out".into()),
+            ..Default::default()
+        })
+        .unwrap_or_else(|_| json!({"bus": false, "error": "accessibility doctor timed out"}))
+    });
     let left = DOCTOR_TOTAL_BUDGET
         .saturating_sub(start.elapsed())
         .clamp(Duration::from_millis(200), IPC_DEADLINE);
@@ -341,18 +342,26 @@ fn norm_app_id(s: &str) -> String {
 /// Does the resolved toplevel still match what the caller listed? Window ids
 /// are per-connection protocol ids in enumeration order, so a window opening
 /// between `windows` and `ax-find` can shift them. Absent expectations pass.
+///
+/// `window_ref_used` (the crate's `window_ref_used`) relaxes only the title
+/// half, and only when `--expect-app-id` was given and matches: a title that
+/// changed since the listing is then expected (the ref identifies the window).
+/// The app-id half is never relaxed.
 pub fn expectation_holds(
     app_id: Option<&str>,
     title: Option<&str>,
     expect_app_id: Option<&str>,
     expect_title: Option<&str>,
+    window_ref_used: bool,
 ) -> bool {
     if let Some(e) = expect_app_id
         && norm_app_id(e) != norm_app_id(app_id.unwrap_or_default())
     {
         return false;
     }
-    if let Some(e) = expect_title
+    let title_relaxed = window_ref_used && expect_app_id.is_some();
+    if !title_relaxed
+        && let Some(e) = expect_title
         && e != title.unwrap_or_default()
     {
         return false;
@@ -373,16 +382,25 @@ pub fn find(conn: &Conn, window: &str, opts: FindOptions) -> Result<Value> {
     // Ids are not stable across connections (and the stable ext identifier is
     // not what `windows` prints), so the caller passes what it listed and a
     // shifted id is refused instead of acting on another app.
-    if !expectation_holds(
-        t.app_id.as_deref(),
-        t.title.as_deref(),
-        opts.expect_app_id.as_deref(),
-        opts.expect_title.as_deref(),
-    ) {
-        return Ok(json!({
+    let (app, title) = (t.app_id.as_deref(), t.title.as_deref());
+    let (ea, et) = (opts.expect_app_id.as_deref(), opts.expect_title.as_deref());
+    let changed = || {
+        Ok(json!({
             "unavailable": "window_changed",
             "hint": "the window list changed; call app_list_windows again",
-        }));
+        }))
+    };
+    let holds_now = expectation_holds(app, title, ea, et, false);
+    // Only a title mismatch can still pass: with `--window-ref` and a matching
+    // `--expect-app-id`, once the crate reports `window_ref_used: true`. The
+    // decision needs the crate's answer, so the walk runs first and its
+    // elements are dropped unless the check then holds.
+    let deferred = !holds_now
+        && opts.flags.window_ref.is_some()
+        && ea.is_some()
+        && expectation_holds(app, title, ea, None, false);
+    if !holds_now && !deferred {
+        return changed();
     }
     let mut hint = WindowHint {
         id: Some(t.id.clone()),
@@ -398,42 +416,27 @@ pub fn find(conn: &Conn, window: &str, opts: FindOptions) -> Result<Value> {
     if let Some((_, windows)) = ipc_snapshot(IPC_DEADLINE) {
         enrich(&mut hint, &windows, dupes);
     }
-    let req = FindRequest {
-        window: hint,
-        role: opts.role,
-        title_contains: opts.title_contains,
-        all: opts.all,
-        include_hidden: opts.include_hidden,
-        max_nodes: opts.max_nodes,
-        max_depth: opts.max_depth,
-    };
-    Ok(serde_json::to_value(cu_atspi::blocking::find(&req)?)?)
+    let outcome = cu_atspi::blocking::find(&opts.flags.request(hint))?;
+    if deferred {
+        let used = matches!(&outcome, cu_atspi::Outcome::Ok(r) if r.window_ref_used == Some(true));
+        if !expectation_holds(app, title, ea, et, used) {
+            return changed();
+        }
+    }
+    Ok(serde_json::to_value(outcome)?)
 }
 
 /// Caller error (bad input): the bridge exits 2 instead of 1.
 #[derive(Debug)]
-pub struct UsageError(pub &'static str);
+pub struct UsageError(pub String);
 
 impl std::fmt::Display for UsageError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.0)
+        f.write_str(&self.0)
     }
 }
 
 impl std::error::Error for UsageError {}
-
-/// Read all of `r` as UTF-8, failing above `cap` bytes.
-pub fn read_capped(r: impl Read, cap: usize) -> Result<String> {
-    let mut buf = Vec::new();
-    r.take(cap as u64 + 1).read_to_end(&mut buf)?;
-    anyhow::ensure!(buf.len() <= cap, "stdin text exceeds {cap} bytes");
-    String::from_utf8(buf).map_err(|_| anyhow::Error::new(UsageError("stdin is not valid UTF-8")))
-}
-
-/// Whole stdin as UTF-8, untrimmed, capped at 16 MiB. Never logged or echoed.
-pub fn read_stdin_text() -> Result<String> {
-    read_capped(std::io::stdin().lock(), MAX_STDIN_TEXT)
-}
 
 #[cfg(test)]
 mod tests {
@@ -548,7 +551,7 @@ mod tests {
 
     #[test]
     fn expectation_match_and_mismatch() {
-        let h = expectation_holds;
+        let h = |a, t, ea, et| expectation_holds(a, t, ea, et, false);
         assert!(h(Some("Firefox"), Some("T"), None, None));
         assert!(h(
             Some("org.x.App"),
@@ -563,12 +566,21 @@ mod tests {
     }
 
     #[test]
-    fn stdin_cap() {
-        assert_eq!(read_capped(&b"abc"[..], 3).unwrap(), "abc");
-        assert!(read_capped(&b"abcd"[..], 3).is_err());
-        assert_eq!(read_capped(&b""[..], 3).unwrap(), "");
-        let e = read_capped(&[0xffu8, 0xfe][..], 8).unwrap_err();
-        assert!(e.downcast_ref::<UsageError>().is_some());
+    fn window_ref_rule() {
+        // (window_ref_used, expect_app_id, actual app id) with a differing title.
+        let holds = |used, ea: Option<&str>, app| {
+            expectation_holds(Some(app), Some("new title"), ea, Some("old title"), used)
+        };
+        // no ref + title differs -> changed
+        assert!(!holds(false, Some("foot"), "foot"));
+        // ref used + app id matches + title differs -> ok
+        assert!(holds(true, Some("foot"), "foot"));
+        // ref used + app id differs -> changed
+        assert!(!holds(true, Some("firefox"), "foot"));
+        // ref used + no expect-app-id + title differs -> changed
+        assert!(!holds(true, None, "foot"));
+        // ref passed but not used + title differs -> changed
+        assert!(!holds(false, Some("foot"), "foot"));
     }
 
     #[test]

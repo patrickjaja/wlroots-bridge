@@ -37,6 +37,11 @@ fn main() -> ExitCode {
     if matches!(cli.command, Command::Overlay) {
         return cu_overlay::run(std::io::stdin(), std::io::stdout());
     }
+    // ax-features is a static list: no compositor, D-Bus or session.
+    if matches!(cli.command, Command::AxFeatures) {
+        println!("{}", cu_atspi::features_json());
+        return ExitCode::SUCCESS;
+    }
     match run(cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -82,41 +87,31 @@ fn run(cli: Cli) -> Result<()> {
         }
         Command::AxFind {
             window,
-            role,
-            title_contains,
-            all,
-            include_hidden,
-            max_nodes,
-            max_depth,
             expect_app_id,
             expect_title,
+            ax,
         } => {
             let conn = Conn::connect()?;
             let opts = ax::FindOptions {
-                role,
-                title_contains,
-                all,
-                include_hidden,
-                max_nodes,
-                max_depth,
+                flags: ax,
                 expect_app_id,
                 expect_title,
             };
             print_json(&ax::find(&conn, &window, opts)?)?;
         }
-        Command::AxAction {
-            scope,
-            element_ref,
-            action,
-        } => {
-            // set-text reads the text from stdin only (never argv, never logged).
-            let action = match action {
-                cli::AxActionKind::Click => cu_atspi::Action::Click,
-                cli::AxActionKind::Focus => cu_atspi::Action::Focus,
-                cli::AxActionKind::SetText => cu_atspi::Action::SetText(ax::read_stdin_text()?),
+        Command::AxAction { ax } => {
+            // Text and expectations come from stdin only (never argv, never
+            // logged). The bridge targets Wayland sessions: `x11` stays false.
+            let req = match ax.request(false, std::io::stdin().lock()) {
+                Ok(req) => req,
+                Err(cu_atspi::RequestError::Usage(msg)) => {
+                    return Err(anyhow::Error::new(ax::UsageError(msg)));
+                }
+                Err(cu_atspi::RequestError::Io(msg)) => return Err(anyhow::anyhow!(msg)),
             };
-            print_json(&cu_atspi::blocking::action(&element_ref, &action, &scope)?)?;
+            print_json(&cu_atspi::blocking::act(&req)?)?;
         }
+        Command::AxFeatures => unreachable!("handled in main"),
         Command::Screens => {
             let conn = Conn::connect()?;
             print_json(&screens::screens(&conn)?)?;
