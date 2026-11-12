@@ -71,17 +71,25 @@ impl Keyboard {
         keysyms: &[u32],
         shift_levels: bool,
     ) -> Result<Self> {
-        let keymap = keymap::generate_keymap_with(keysyms, shift_levels);
+        Self::with_keymap(
+            conn,
+            qh,
+            keymap::generate_keymap_with(keysyms, shift_levels),
+        )
+    }
+
+    /// Create a virtual keyboard and upload `keymap`.
+    fn with_keymap(
+        conn: &Conn,
+        qh: &QueueHandle<KeyboardState>,
+        keymap: GeneratedKeymap,
+    ) -> Result<Self> {
         let manager = conn.bind_virtual_keyboard_manager(qh)?;
         let seat = conn.bind_seat(qh)?;
         let had_keyboard = conn.seat_has(wl_seat::Capability::Keyboard);
         let kb = manager.create_virtual_keyboard(&seat, qh, ());
 
-        // Upload the keymap text (NUL-terminated) via a memfd.
-        let mut bytes = keymap.text.clone().into_bytes();
-        bytes.push(0); // xkbcommon expects a NUL terminator
-        let file = write_memfd(&bytes)?;
-        kb.keymap(XKB_V1, file.as_fd(), bytes.len() as u32);
+        upload_keymap(&kb, &keymap)?;
         conn.settle_new_device(had_keyboard)?;
 
         Ok(Self {
@@ -89,6 +97,11 @@ impl Keyboard {
             keymap,
             mods: Cell::new(0),
         })
+    }
+
+    /// Remove the device (no key may be held).
+    fn destroy(self) {
+        self.kb.destroy();
     }
 
     /// Send a key event. A modifier key is followed by `modifiers` carrying
@@ -128,6 +141,18 @@ impl Keyboard {
             self.set_modifiers(0);
         }
     }
+}
+
+/// Upload the keymap text (NUL-terminated) via a memfd.
+fn upload_keymap(
+    kb: &zwp_virtual_keyboard_v1::ZwpVirtualKeyboardV1,
+    keymap: &GeneratedKeymap,
+) -> Result<()> {
+    let mut bytes = keymap.text.clone().into_bytes();
+    bytes.push(0); // xkbcommon expects a NUL terminator
+    let file = write_memfd(&bytes)?;
+    kb.keymap(XKB_V1, file.as_fd(), bytes.len() as u32);
+    Ok(())
 }
 
 fn now_ms() -> u32 {
@@ -230,14 +255,17 @@ pub fn key_sequence(conn: &Conn, keys: &str, repeat: Option<u32>) -> Result<Keyb
 
 /// Type `text` as individual key events, `delay_ms` apart.
 ///
-/// Every distinct char in the text gets a keycode in one generated keymap
-/// (repeated chars reuse the same placement), so even long Unicode text needs a
-/// single keymap upload. XKB keymaps comfortably hold hundreds of keys; should a
-/// text exceed the keycode space we page it (re-generate + re-upload).
+/// Every distinct char gets a key in one generated keymap (repeated chars
+/// reuse it). Characters go only to keys clients take as character keys
+/// ([`keymap::type_pages`]), about 50 of them, so a text with more distinct
+/// characters continues on a new keyboard with the next keymap where the next
+/// character no longer fits (DESIGN.md, Keymap generation, has the limits).
 pub fn type_text(conn: &Conn, text: &str, delay_ms: u64) -> Result<TypeActionResult> {
-    // Map each char to a keysym, deduplicating so the keymap stays compact.
-    let chars: Vec<char> = text.chars().collect();
-    if chars.is_empty() {
+    let keysyms: Vec<u32> = text
+        .chars()
+        .map(keymap::keysym_for_char)
+        .collect::<Result<_>>()?;
+    if keysyms.is_empty() {
         return Ok(TypeActionResult {
             action: "type".to_owned(),
             text: text.to_owned(),
@@ -245,68 +273,68 @@ pub fn type_text(conn: &Conn, text: &str, delay_ms: u64) -> Result<TypeActionRes
         });
     }
 
-    // Build the distinct keysym set (order-preserving) and an index for each char.
-    let mut distinct: Vec<u32> = Vec::new();
-    let mut char_to_slot: Vec<usize> = Vec::with_capacity(chars.len());
-    for &ch in &chars {
-        let ks = keymap::keysym_for_char(ch)?;
-        let slot = match distinct.iter().position(|&k| k == ks) {
-            Some(i) => i,
-            None => {
-                distinct.push(ks);
-                distinct.len() - 1
-            }
-        };
-        char_to_slot.push(slot);
-    }
-
-    // XKB keycodes are u8 on the wire in some paths; keep the distinct set within
-    // a safe page size and re-upload if a text somehow uses that many glyphs.
-    const MAX_KEYS_PER_PAGE: usize = 200;
-
     let mut queue = conn.conn.new_event_queue::<KeyboardState>();
     let qh = queue.handle();
 
+    let mut kb: Option<Keyboard> = None;
     let mut char_count = 0usize;
-
-    // Page the distinct keysyms; within a page, type every char whose slot falls
-    // in that page. Simpler correct approach: if the whole set fits one page
-    // (the overwhelmingly common case), one keyboard + one pass.
-    if distinct.len() <= MAX_KEYS_PER_PAGE {
-        let kb = Keyboard::create(conn, &qh, &distinct, false)?;
-        for (i, &slot) in char_to_slot.iter().enumerate() {
-            if i > 0 && delay_ms > 0 {
-                queue.flush().ok();
-                thread::sleep(Duration::from_millis(delay_ms));
-            }
-            tap(&kb, slot);
-            char_count += 1;
-        }
-        queue
-            .roundtrip(&mut KeyboardState)
-            .context("type roundtrip")?;
-    } else {
-        // Rare: more than MAX_KEYS_PER_PAGE distinct glyphs. Type char-by-char,
-        // rebuilding a single-key keymap per char (correct, just slower).
-        for (i, &ch) in chars.iter().enumerate() {
-            if i > 0 && delay_ms > 0 {
-                thread::sleep(Duration::from_millis(delay_ms));
-            }
-            let ks = keymap::keysym_for_char(ch)?;
-            let kb = Keyboard::create(conn, &qh, &[ks], false)?;
-            tap(&kb, 0);
+    let mut page_start = 0usize;
+    for page in keymap::type_pages(&keysyms) {
+        // Each page is a new device: Hyprland (0.56) never passes a second
+        // keymap of the same virtual keyboard on to clients, so the next
+        // page's keys came out as the old page's symbols; a new keyboard's
+        // keymap goes out with its first key. The new one comes up before the
+        // old one goes, so the seat never loses its keyboard on a compositor
+        // without a physical one.
+        let old = kb.take();
+        if old.is_some() {
+            // X11 clients translate a key with the keymap current when they
+            // get round to it: let them catch up before the keymap changes.
             queue
                 .roundtrip(&mut KeyboardState)
                 .context("type roundtrip")?;
+            thread::sleep(page_drain(delay_ms, char_count - page_start));
+        }
+        let kb = kb.insert(Keyboard::with_keymap(conn, &qh, page.keymap)?);
+        if let Some(old) = old {
+            old.destroy();
+        }
+        page_start = char_count;
+        for slot in page.slots {
+            if char_count > 0 && delay_ms > 0 {
+                queue.flush().ok();
+                thread::sleep(Duration::from_millis(delay_ms));
+            }
+            tap(kb, slot);
             char_count += 1;
         }
     }
+    queue
+        .roundtrip(&mut KeyboardState)
+        .context("type roundtrip")?;
 
     Ok(TypeActionResult {
         action: "type".to_owned(),
         text: text.to_owned(),
         char_count,
     })
+}
+
+/// Pause before a `type` run replaces its keymap, after `page_chars` keys
+/// typed `delay_ms` apart with the old one.
+///
+/// A Wayland client gets the new keymap in order with the keys, but an X11
+/// client (Xwayland) translates each key code with the keymap current when it
+/// reads the event: a key still queued there when the keymap changes comes out
+/// as whatever the new keymap has on that code. Seen with XWayland Chromium on
+/// sway: at 0 ms the whole first page arrived as second-page symbols, at 1 ms
+/// the last key did; a 10 ms pause was enough for a 50-key page. A run typed
+/// faster than the client can keep up gets one more millisecond per key.
+fn page_drain(delay_ms: u64, page_chars: usize) -> Duration {
+    const BASE_MS: u64 = 50;
+    const MAX_MS: u64 = 1000;
+    let backlog = if delay_ms < 2 { page_chars as u64 } else { 0 };
+    Duration::from_millis((BASE_MS + backlog).min(MAX_MS))
 }
 
 /// Press + release the key at `slot` in the keyboard's keymap, driving Shift if
@@ -473,6 +501,15 @@ mod tests {
         assert_eq!(KEY_PRESSED, 1);
         assert_eq!(KEY_RELEASED, 0);
         assert_eq!(XKB_V1, 1);
+    }
+
+    #[test]
+    fn page_drain_grows_only_for_unpaced_runs() {
+        assert_eq!(page_drain(12, 50), Duration::from_millis(50));
+        assert_eq!(page_drain(2, 500), Duration::from_millis(50));
+        assert_eq!(page_drain(0, 50), Duration::from_millis(100));
+        assert_eq!(page_drain(1, 200), Duration::from_millis(250));
+        assert_eq!(page_drain(0, 100_000), Duration::from_millis(1000));
     }
 
     #[test]

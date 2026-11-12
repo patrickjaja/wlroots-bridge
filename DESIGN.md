@@ -129,9 +129,8 @@ device the bridge reads `wl_seat.capabilities` (`Conn::seat_has`); after
 creating it (and, for the keyboard, uploading the keymap) it does a roundtrip
 and, only if the capability was absent before, waits 50 ms
 (`Conn::settle_new_device`). A seat with a keyboard and pointer costs one extra
-roundtrip per device. In the per-char path of `type` (more than 200 distinct
-glyphs) the earlier keyboards stay alive until the process exits, so only the
-first one waits.
+roundtrip per device. When `type` moves to its next keymap page it creates the
+next keyboard before destroying the previous one, so only the first one waits.
 
 ## Keymap generation
 
@@ -146,10 +145,21 @@ XKB keymap text ourselves** (the wtype technique, hand-rolled in
   `modifier_map` entries), letters, digits, punctuation (an uppercase or
   shifted glyph takes its key's code when the lowercase one is not in the
   same keymap), Return, Tab, BackSpace, space, F1-F12, arrows, Home/End,
-  Prior/Next, Insert, Delete. Everything else goes to codes the US layout
-  leaves unmapped, then to the alphanumeric block, then to the rest, never to
-  xkb 9 or a code that carries a modifier or lock in the US layout, and never
-  above 255 (X11 clients). A keysym requested twice reuses its code.
+  Prior/Next, Insert, Delete. In a combo (`key-sequence`, `hold-key`)
+  everything else goes to codes the US layout leaves unmapped (IntlRo 97 and
+  IntlYen 132 first), then to the alphanumeric block, then to the rest, never
+  to xkb 9 or a code that carries a modifier or lock in the US layout, and
+  never above 255 (X11 clients). A keysym requested twice reuses its code.
+- `type` spills only to **character keys**: the alphanumeric block plus
+  IntlBackslash 94, IntlRo 97 and IntlYen 132 (`layout::printable`, 50
+  codes). Chromium, and so every Electron app, names a key by its code alone
+  and decides from that name whether it is a character key: a character on a
+  code it has no name for (KEY_KPJPCOMMA 95 and up) never arrives, one on
+  Backspace deletes instead, one on F1 opens Help. With the old spill order a
+  text holding `g n m e b c` and `G N M E B C +` lost the capitals and the
+  plus in Claude Desktop (Hyprland and sway, any layout), and `(` deleted the
+  previous character in XWayland Chromium. Terminals such as foot only read
+  the keymap and were never affected.
 - Why: Hyprland (seen on 0.56.2) matches a virtual keyboard's keys against
   its key BINDINGS by evdev code in the user's own layout, not by the keymap
   the client uploaded. The previous sequential layout put Control_L on evdev
@@ -189,8 +199,25 @@ XKB keymap text ourselves** (the wtype technique, hand-rolled in
   (`U597D`, `U1F600`) via the keysym encoding `0x01000000 | codepoint`.
 - The `key` request carries the **Linux evdev code** = XKB keycode - 8.
 - `type` builds one keymap holding every *distinct* char in the text (repeated
-  chars reuse a keycode), so a whole string needs a single upload. Texts with
-  more than 200 distinct glyphs page to a per-char keymap (correct, slower).
+  chars reuse a keycode). 50 distinct characters fit (one per character key,
+  plus space, Return and Tab); a text with more is typed in pages
+  (`keymap::type_pages`): where the next character no longer fits, the bridge
+  waits for clients to catch up (a roundtrip and 50 ms, plus 1 ms per key of
+  the finished page when typing at under 2 ms per key), creates a new virtual
+  keyboard with the next page's keymap and destroys the old one. A new device
+  rather than a second `keymap` request on the same one: Hyprland 0.56 never
+  passes a replaced keymap of a virtual keyboard on to clients, so the next
+  page came out as the old page's symbols. The pause is for X11 clients,
+  which translate a key with the keymap current when they read it: XWayland
+  Chromium read the end of a page with the next page's keymap without it.
+  Known limits: on Hyprland, XWayland clients can still misread the first
+  keys after a keymap change when keys come less than about 6 ms apart (the
+  executor types at 12 ms; at 0 ms the old bridge was sometimes affected at
+  the start of a run too). Characters outside the Basic Multilingual Plane
+  (emoji) reach native-Wayland Chromium truncated to 16 bits (`😀` U+1F600
+  arrives as U+F600): Chromium keeps a key's character in 16 bits, so no
+  keymap can fix it; XWayland Chromium and foot get them intact. Send such
+  text through the clipboard.
 
 The keymap text is written to a `memfd` (falling back to an unlinked
 `$XDG_RUNTIME_DIR` file) and uploaded with a NUL terminator, as xkbcommon

@@ -132,3 +132,11 @@ jobs:
         env:
           WLROOTS_BRIDGE_REQUIRE_SWAY: "1"
         run: cargo test --locked --target x86_64-unknown-linux-musl --test overlay_sway
+
+      # type against real headless sway with a German layout: exact text in
+      # foot across keymap pages, and only character-key codes on the wire
+      # (Chromium drops or misreads characters on any other code).
+      - name: type tests (real sway)
+        env:
+          WLROOTS_BRIDGE_REQUIRE_SWAY: "1"
+        run: cargo test --locked --target x86_64-unknown-linux-musl --test type_sway

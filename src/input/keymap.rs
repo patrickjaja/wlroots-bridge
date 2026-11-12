@@ -359,6 +359,11 @@ pub struct GeneratedKeymap {
 /// that carries a modifier or lock in the US layout. Applications are not
 /// affected: they follow the uploaded keymap, where every placed code carries
 /// exactly the requested keysym.
+///
+/// `type` spills more narrowly, to [`layout::printable`] codes only: clients
+/// do look at the code. Chromium names a key by its code and decides from that
+/// name whether it is a character key at all, so a character on an unmapped
+/// code never arrives and one on Backspace deletes instead.
 pub mod layout {
     /// XKB keycodes of the four modifiers we drive (evdev = xkb - 8).
     pub const CTRL: u32 = 37;
@@ -464,10 +469,29 @@ pub mod layout {
         37, 50, 62, 64, 66, 77, 92, 105, 108, 133, 134, 203, 204, 205, 206,
     ];
 
-    /// Codes (<= 255) the US layout leaves without any symbol.
+    /// Codes (<= 255) the US layout leaves without any symbol. The two that
+    /// Chromium (and so every Electron app) maps to a key, IntlRo and IntlYen,
+    /// come first: Chromium drops a key whose code it has no name for.
     pub const US_UNMAPPED: &[u32] = &[
-        97, 103, 120, 132, 149, 154, 168, 178, 183, 184, 219, 222, 230, 248,
+        97, 132, 103, 120, 149, 154, 168, 178, 183, 184, 219, 222, 230, 248,
     ];
+
+    /// Codes a client takes for an ordinary character key whatever symbol the
+    /// keymap puts there: the alphanumeric block plus IntlBackslash (94),
+    /// IntlRo (97) and IntlYen (132). Chromium decides from the code alone
+    /// what else a key does, so a character placed on any other code is lost
+    /// or does that key's job instead: nothing at all for codes it has no
+    /// name for (KEY_KPJPCOMMA and up), deleting on Backspace, and opening
+    /// Help on F1. `type` places characters only here (or on their own named
+    /// key: space, Return, Tab).
+    pub fn printable() -> impl Iterator<Item = u32> + Clone {
+        [97, 132, 94]
+            .into_iter()
+            .chain(10..=21)
+            .chain(24..=35)
+            .chain(38..=49)
+            .chain(51..=61)
+    }
 
     /// The US position of `keysym`: (code, at level 1).
     pub fn standard(keysym: u32) -> Option<(u32, bool)> {
@@ -510,6 +534,8 @@ pub fn generate_keymap(keysyms: &[u32]) -> GeneratedKeymap {
 /// in `keysyms` (see [`layout`] for where each one goes). A keysym requested
 /// twice gets the same keycode.
 ///
+/// For `key-sequence` / `hold-key`; `type` uses [`type_pages`].
+///
 /// Shift levels: without `shift_levels` each requested keysym sits at both
 /// levels of its key (`[ a, a ]`), so it arrives exactly as requested even
 /// with Shift held. With `shift_levels` (a `key-sequence` / `hold-key` combo
@@ -522,6 +548,71 @@ pub fn generate_keymap(keysyms: &[u32]) -> GeneratedKeymap {
 /// The `key` request wants the evdev code (= XKB keycode - 8), so the returned
 /// placements carry `xkb_keycode - 8`.
 pub fn generate_keymap_with(keysyms: &[u32], shift_levels: bool) -> GeneratedKeymap {
+    build_keymap(keysyms, shift_levels, layout::spill(), true).expect("overflow codes always fit")
+}
+
+/// A keymap for `type`: like [`generate_keymap`], but keysyms without a free
+/// US position go only to [`layout::printable`] codes. `None` when they do not
+/// all fit (50 characters, plus space, Return and Tab on their own keys).
+pub fn generate_type_keymap(keysyms: &[u32]) -> Option<GeneratedKeymap> {
+    build_keymap(keysyms, false, layout::printable(), false)
+}
+
+/// One keymap of a `type` run and the characters typed with it.
+#[derive(Debug, Clone)]
+pub struct TypePage {
+    pub keymap: GeneratedKeymap,
+    /// For each character of the page, in order: its placement index.
+    pub slots: Vec<usize>,
+}
+
+/// Split the keysyms of a text into consecutive pages that each fit one
+/// [`generate_type_keymap`] keymap. Most texts need one page; a text with
+/// more distinct characters than printable keys gets a new keymap uploaded
+/// where the next character no longer fits.
+pub fn type_pages(keysyms: &[u32]) -> Vec<TypePage> {
+    let mut pages = Vec::new();
+    let mut distinct: Vec<u32> = Vec::new();
+    let mut slots: Vec<usize> = Vec::new();
+    let mut current: Option<GeneratedKeymap> = None;
+    for &ks in keysyms {
+        if let Some(i) = distinct.iter().position(|&k| k == ks) {
+            slots.push(i);
+            continue;
+        }
+        distinct.push(ks);
+        if let Some(km) = generate_type_keymap(&distinct) {
+            current = Some(km);
+            slots.push(distinct.len() - 1);
+            continue;
+        }
+        // Does not fit: close the page and start the next with this key.
+        if let Some(keymap) = current.take() {
+            pages.push(TypePage {
+                keymap,
+                slots: std::mem::take(&mut slots),
+            });
+        }
+        distinct = vec![ks];
+        current = Some(generate_type_keymap(&distinct).expect("one key always fits"));
+        slots.push(0);
+    }
+    if let Some(keymap) = current {
+        pages.push(TypePage { keymap, slots });
+    }
+    pages
+}
+
+/// The keymap builder behind [`generate_keymap_with`] and
+/// [`generate_type_keymap`]: keysyms without a free US position take codes
+/// from `spill`, then (with `overflow`) codes past [`layout::MAX`]; without
+/// `overflow`, `None` once `spill` is used up.
+fn build_keymap(
+    keysyms: &[u32],
+    shift_levels: bool,
+    spill: impl Iterator<Item = u32>,
+    overflow_ok: bool,
+) -> Option<GeneratedKeymap> {
     use std::collections::{BTreeMap, HashMap};
 
     // keycode -> keysym bound there.
@@ -548,8 +639,8 @@ pub fn generate_keymap_with(keysyms: &[u32], shift_levels: bool) -> GeneratedKey
         }
     }
     // Pass 3: everything else into the spill order (past 255 only if a
-    // caller ever asks for more keys than fit; `type` pages at 200).
-    let mut spill = layout::spill();
+    // combo ever asks for more keys than fit; `type` pages instead).
+    let mut spill = spill;
     let mut overflow = layout::MAX + 1;
     for &ks in keysyms {
         if code_of.contains_key(&ks) {
@@ -559,10 +650,11 @@ pub fn generate_keymap_with(keysyms: &[u32], shift_levels: bool) -> GeneratedKey
             match spill.next() {
                 Some(kc) if !used.contains_key(&kc) => break kc,
                 Some(_) => continue,
-                None => {
+                None if overflow_ok => {
                     overflow += 1;
                     break overflow - 1;
                 }
+                None => return None,
             }
         };
         used.insert(kc, ks);
@@ -636,14 +728,14 @@ pub fn generate_keymap_with(keysyms: &[u32], shift_levels: bool) -> GeneratedKey
 
     let text = format!("xkb_keymap {{\n{keycodes}{types}{compat}{symbols}}};\n");
 
-    GeneratedKeymap {
+    Some(GeneratedKeymap {
         text,
         ctrl_code: layout::CTRL - 8,
         shift_code: layout::SHIFT - 8,
         alt_code: layout::ALT - 8,
         super_code: layout::SUPER - 8,
         placements,
-    }
+    })
 }
 
 /// The evdev code for a modifier token, within a generated keymap.
@@ -956,7 +1048,8 @@ mod tests {
 
     #[test]
     fn many_distinct_keys_avoid_escape_and_modifier_codes() {
-        // 200 distinct glyphs (the `type` page size): Latin, shifted, CJK.
+        // 200 distinct glyphs (a combo never asks for that many, but the
+        // overflow path must stay sound): Latin, shifted, CJK.
         let mut syms: Vec<u32> = (0x21u32..0x7f).collect(); // printable ASCII
         syms.extend(
             (0x4e00u32..)
@@ -981,6 +1074,133 @@ mod tests {
         // Lowercase letters keep their US codes; their uppercase twins spill.
         assert_eq!(km.placements[(b'a' - 0x21) as usize].evdev_code, 30);
         assert_ne!(km.placements[(b'A' - 0x21) as usize].evdev_code, 30);
+    }
+
+    /// Every code a `type` keymap puts a character on, with the keysym there.
+    fn type_codes(page: &TypePage, keysyms: &[u32]) -> Vec<(u32, u32)> {
+        page.slots
+            .iter()
+            .map(|&slot| (page.keymap.placements[slot].evdev_code + 8, keysyms[slot]))
+            .collect()
+    }
+
+    /// The live failure (Hyprland and sway, `de`, Electron): with `g n m e b c`
+    /// already on their own keys, `G N M E B C +` went to codes Chromium has
+    /// no name for (KEY_KPJPCOMMA and up) and never arrived. `type` must put
+    /// them on character keys only.
+    #[test]
+    fn type_spills_only_to_printable_codes() {
+        let text = "gnmebc+= GNMEBC+_{}|~\":!?*() €ßäöüÄÖÜ漢字";
+        let keysyms: Vec<u32> = text.chars().map(|c| keysym_for_char(c).unwrap()).collect();
+        let pages = type_pages(&keysyms);
+        assert_eq!(pages.len(), 1);
+        let page = &pages[0];
+        assert_eq!(page.slots.len(), keysyms.len());
+        let printable: Vec<u32> = layout::printable().collect();
+        let mut distinct = Vec::new();
+        for &ks in &keysyms {
+            if !distinct.contains(&ks) {
+                distinct.push(ks);
+            }
+        }
+        for (kc, ks) in type_codes(page, &distinct) {
+            let own_key = layout::standard(ks).map(|(c, _)| c) == Some(kc);
+            assert!(
+                printable.contains(&kc) || own_key,
+                "{} on code {kc}",
+                xkb_symbol_name(ks)
+            );
+            // Exactly that keysym on both levels of the key.
+            let sym = xkb_symbol_name(ks);
+            assert!(
+                page.keymap
+                    .text
+                    .contains(&format!("key <K{kc}> {{ [ {sym}, {sym} ] }};")),
+                "{sym} at {kc}: {}",
+                page.keymap.text
+            );
+        }
+        // Never Backspace, Tab, Return, Escape or a function key for a spilled
+        // character: Chromium would run that key's action instead.
+        let spilled = type_codes(page, &distinct);
+        for kc in [9, 22, 23, 36, 67, 68] {
+            assert!(!spilled.iter().any(|(c, _)| *c == kc), "code {kc} used");
+        }
+    }
+
+    #[test]
+    fn printable_codes_are_character_keys() {
+        let codes: Vec<u32> = layout::printable().collect();
+        let mut uniq = codes.clone();
+        uniq.sort();
+        uniq.dedup();
+        assert_eq!(uniq.len(), codes.len(), "no duplicates");
+        assert_eq!(codes.len(), 50);
+        for kc in &codes {
+            assert!(!layout::US_MODIFIERS.contains(kc));
+            assert_ne!(*kc, layout::ESCAPE);
+            // Each one is a character key in the US layout, or IntlBackslash /
+            // IntlRo / IntlYen.
+            let us_char = layout::US
+                .iter()
+                .any(|&(c, l1, _)| c == *kc && (0x20..0x7f).contains(&l1));
+            assert!(us_char || [94, 97, 132].contains(kc), "code {kc}");
+        }
+        // Named keys a client acts on are not among them.
+        for kc in [22, 23, 36, 65, 103, 119] {
+            assert!(!codes.contains(&kc), "code {kc}");
+        }
+    }
+
+    #[test]
+    fn type_pages_split_where_the_keymap_is_full() {
+        // CJK has no US position: each takes one printable code.
+        let cjk = |n: u32| -> Vec<u32> { (0..n).map(|i| 0x0100_0000 | (0x4e00 + i)).collect() };
+        let pages = type_pages(&cjk(50));
+        assert_eq!(pages.len(), 1);
+        let pages = type_pages(&cjk(51));
+        assert_eq!(pages.len(), 2);
+        assert_eq!(pages[0].slots.len(), 50);
+        assert_eq!(pages[1].slots, vec![0]);
+
+        // Repeats reuse the slot and never open a page.
+        let mut syms = cjk(50);
+        syms.extend(cjk(50));
+        let pages = type_pages(&syms);
+        assert_eq!(pages.len(), 1);
+        assert_eq!(pages[0].slots[50..], (0..50).collect::<Vec<_>>()[..]);
+
+        // Each page types its own characters, in order, and nothing is lost.
+        let text = "The quick brown fox jumps over the lazy dog. THE QUICK BROWN FOX! 0123456789 (§$%&/=?) äöüß ÄÖÜ €@ {[]}\\ <>|~#'\"";
+        let keysyms: Vec<u32> = text.chars().map(|c| keysym_for_char(c).unwrap()).collect();
+        let pages = type_pages(&keysyms);
+        assert!(pages.len() >= 2, "{} pages", pages.len());
+        let mut typed = Vec::new();
+        for page in &pages {
+            // A page's keymap holds each of its keys exactly once.
+            let mut local: Vec<u32> = Vec::new();
+            let mut it = keysyms[typed.len()..].iter();
+            for &slot in &page.slots {
+                let ks = *it.next().unwrap();
+                if slot == local.len() {
+                    local.push(ks);
+                }
+                assert_eq!(local[slot], ks);
+                typed.push(ks);
+            }
+            assert_eq!(page.keymap.placements.len(), local.len());
+        }
+        assert_eq!(typed, keysyms);
+    }
+
+    #[test]
+    fn combo_spill_prefers_codes_chromium_knows() {
+        // IntlRo and IntlYen first: a spilled combo key stays visible to
+        // Chromium for the first two keys.
+        assert_eq!(&layout::US_UNMAPPED[..2], &[97, 132]);
+        let km = generate_keymap(&[0xe4, 0xf6]); // ä ö
+        assert_eq!(km.placements[0].evdev_code, 97 - 8);
+        assert_eq!(km.placements[1].evdev_code, 132 - 8);
     }
 
     #[test]

@@ -763,8 +763,11 @@ fn injected_keys_sit_at_standard_codes() {
         (43, "H"),         // US position of h/H
         (31, "i"),
         (10, "exclam"), // US position of 1/!
-        (97, "eacute"), // no US position: first unmapped code
-        (103, "U597D"),
+        // No US position: the character keys Chromium knows that the US
+        // layout leaves empty, IntlRo then IntlYen (never KEY_KPJPCOMMA and
+        // up, which Chromium drops).
+        (97, "eacute"),
+        (132, "U597D"),
         (9, "Escape"), // evdev 1 = KEY_ESC
     ];
     assert_eq!(got, want);
