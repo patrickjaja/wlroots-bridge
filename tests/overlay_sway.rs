@@ -368,6 +368,7 @@ fn overlay_draws_and_exits_on_stdin_eof() {
     let mut ov = Overlay::spawn(&sway, &[]);
     let ready = expect_event(&ov.lines, "ready");
     assert_eq!(ready["protocol"], 1);
+    assert_eq!(ready["badge"], true);
     assert_eq!(ready["outputs"][0]["name"], "HEADLESS-1");
     ov.send(SHOW_RIM);
     expect_event(&ov.lines, "shown");

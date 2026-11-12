@@ -8,6 +8,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **The overlay draws its text badge** (`cu-overlay` e1f1a91): `ready` reports
+  `"badge": true` and `show` accepts `badgeText`. The binary embeds a Noto Sans
+  subset (OFL 1.1, see THIRD-PARTY.md).
 - **Masked screenshots capture each kept window on its own on Hyprland**
   (`ext_image_copy_capture_v1` with a foreign-toplevel source on 0.54+, else
   `hyprland_toplevel_export_v1` v2 on an upright output): the kept windows are

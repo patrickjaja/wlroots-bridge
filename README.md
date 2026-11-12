@@ -280,5 +280,5 @@ path for `js/cu_linux_executor.js` to call.
 ## License
 
 MIT. See [LICENSE](LICENSE). The vendored Hyprland protocol files in
-`protocols/` are BSD-3-Clause (hyprland-protocols); see
-[THIRD-PARTY.md](THIRD-PARTY.md).
+`protocols/` are BSD-3-Clause (hyprland-protocols), and the overlay's badge
+font (a Noto Sans subset) is OFL-1.1; see [THIRD-PARTY.md](THIRD-PARTY.md).
