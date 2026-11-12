@@ -323,7 +323,7 @@ const SHOW_RIM: &str =
     r#"{"cmd":"show","output":"HEADLESS-1","look":"rim","arrow":{"x":300,"y":200}}"#;
 
 /// Rim on all four edges, the arrow at (300,200), interior untouched.
-fn assert_rim_and_arrow(s: &Shot, interior: fn([u8; 3]) -> bool) {
+fn assert_rim_and_arrow(s: &Shot, interior: impl Fn([u8; 3]) -> bool) {
     for (x, y) in [(0, 400), (1, 400), (1279, 400), (640, 0), (640, 799)] {
         assert!(clay(s.px(x, y)), "rim at {x},{y}: {:?}", s.px(x, y));
     }
@@ -360,6 +360,11 @@ fn doctor_reports_overlay_on_sway() {
 fn overlay_draws_and_exits_on_stdin_eof() {
     require!("sway");
     let sway = Sway::start();
+    // The empty-output colour is the compositor's: black on sway >= 1.10,
+    // dark gray (63,63,63) on the sway 1.9 of ubuntu-24.04.
+    let (s, _) = shot(&sway, "overlay-empty", &[]);
+    let empty = s.px(640, 400);
+    assert!(near(s.px(0, 400), empty, 8), "empty output not uniform");
     let mut ov = Overlay::spawn(&sway, &[]);
     let ready = expect_event(&ov.lines, "ready");
     assert_eq!(ready["protocol"], 1);
@@ -368,7 +373,7 @@ fn overlay_draws_and_exits_on_stdin_eof() {
     expect_event(&ov.lines, "shown");
     std::thread::sleep(Duration::from_millis(500));
     let (s, _) = shot(&sway, "overlay-rim", &[]);
-    assert_rim_and_arrow(&s, |p| p.iter().all(|&c| c <= 24));
+    assert_rim_and_arrow(&s, |p| near(p, empty, 24));
 
     // stdin EOF: exit 0, surfaces gone with the connection.
     ov.stdin.take();
@@ -376,8 +381,10 @@ fn overlay_draws_and_exits_on_stdin_eof() {
     std::thread::sleep(Duration::from_millis(200));
     let (s, _) = shot(&sway, "overlay-after-eof", &[]);
     assert!(
-        !clay(s.px(0, 400)) && !clay(s.px(312, 212)),
-        "rim left behind"
+        near(s.px(0, 400), empty, 24) && near(s.px(312, 212), empty, 24),
+        "rim or arrow left behind: {:?} {:?}",
+        s.px(0, 400),
+        s.px(312, 212)
     );
 }
 
