@@ -144,9 +144,8 @@ pub fn enumerate(conn: &Conn) -> Result<Vec<OutputEntry>> {
     // Request an xdg-output for each wl_output, keyed by its index so events
     // route back to the right entry.
     if let Ok(xdg_mgr) = conn.bind_xdg_output_manager(&qh) {
-        for index in 0..state.entries.len() {
-            let wl_output = state.entries[index].wl_output.clone();
-            xdg_mgr.get_xdg_output(&wl_output, &qh, index);
+        for (index, entry) in state.entries.iter().enumerate() {
+            xdg_mgr.get_xdg_output(&entry.wl_output, &qh, index);
         }
     }
 
