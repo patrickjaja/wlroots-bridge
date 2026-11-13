@@ -201,7 +201,7 @@ dependencies = [
 [[package]]
 name = "cu-atspi"
 version = "0.1.0"
-source = "git+https://github.com/patrickjaja/cu-atspi?rev=36f727a105dd745f0f6458cb050aa0a3f870e61b#36f727a105dd745f0f6458cb050aa0a3f870e61b"
+source = "git+https://github.com/patrickjaja/cu-atspi?rev=30ff9c84332569aadb4b83364cfdc89fa7ca6a04#30ff9c84332569aadb4b83364cfdc89fa7ca6a04"
 dependencies = [
  "atspi-common",
  "clap",

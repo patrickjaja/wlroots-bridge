@@ -369,6 +369,27 @@ pub fn expectation_holds(
     true
 }
 
+/// The deferred `--window-ref` case of [`find`]: the title differs from
+/// `--expect-title`, so the result is accepted only when the crate used the
+/// ref, the app id matches, and the ref window's current accessible title is
+/// the CURRENT title of the toplevel `--window` resolved to (whitespace and
+/// dashes normalized, case-insensitive). That allows "the title changed since
+/// the caller listed it" and refuses "this id now names another window of
+/// the app". `result_title` is the crate result's `window.title` (`None` for
+/// an unavailable answer).
+pub fn deferred_window_ref_holds(
+    app_id: Option<&str>,
+    title: Option<&str>,
+    expect_app_id: Option<&str>,
+    expect_title: Option<&str>,
+    window_ref_used: bool,
+    result_title: Option<&str>,
+) -> bool {
+    window_ref_used
+        && expectation_holds(app_id, title, expect_app_id, expect_title, true)
+        && result_title.is_some_and(|r| cu_atspi::window::same_title(r, title.unwrap_or_default()))
+}
+
 /// `ax-find`: resolve the window from the foreign-toplevel list, enrich it from
 /// the compositor IPC when possible, then ask AT-SPI.
 pub fn find(conn: &Conn, window: &str, opts: FindOptions) -> Result<Value> {
@@ -392,9 +413,10 @@ pub fn find(conn: &Conn, window: &str, opts: FindOptions) -> Result<Value> {
     };
     let holds_now = expectation_holds(app, title, ea, et, false);
     // Only a title mismatch can still pass: with `--window-ref` and a matching
-    // `--expect-app-id`, once the crate reports `window_ref_used: true`. The
-    // decision needs the crate's answer, so the walk runs first and its
-    // elements are dropped unless the check then holds.
+    // `--expect-app-id`, once the crate reports `window_ref_used: true` for a
+    // window that carries the toplevel's current title. The decision needs
+    // the crate's answer, so the walk runs first and its elements are dropped
+    // unless the check then holds.
     let deferred = !holds_now
         && opts.flags.window_ref.is_some()
         && ea.is_some()
@@ -418,8 +440,14 @@ pub fn find(conn: &Conn, window: &str, opts: FindOptions) -> Result<Value> {
     }
     let outcome = cu_atspi::blocking::find(&opts.flags.request(hint))?;
     if deferred {
-        let used = matches!(&outcome, cu_atspi::Outcome::Ok(r) if r.window_ref_used == Some(true));
-        if !expectation_holds(app, title, ea, et, used) {
+        let (used, result_title) = match &outcome {
+            cu_atspi::Outcome::Ok(r) => (
+                r.window_ref_used == Some(true),
+                Some(r.window.title.as_str()),
+            ),
+            cu_atspi::Outcome::Unavailable(_) => (false, None),
+        };
+        if !deferred_window_ref_holds(app, title, ea, et, used, result_title) {
             return changed();
         }
     }
@@ -581,6 +609,41 @@ mod tests {
         assert!(!holds(true, None, "foot"));
         // ref passed but not used + title differs -> changed
         assert!(!holds(false, Some("foot"), "foot"));
+    }
+
+    #[test]
+    fn deferred_window_ref_needs_the_current_title() {
+        // `--window <id>` resolved to a toplevel now titled "new title"; the
+        // caller listed it as "old title" with the same app id.
+        let ok = |used, result_title: Option<&str>| {
+            deferred_window_ref_holds(
+                Some("foot"),
+                Some("new title"),
+                Some("foot"),
+                Some("old title"),
+                used,
+                result_title,
+            )
+        };
+        // The ref window carries the toplevel's current title: the title
+        // changed since the listing, same window.
+        assert!(ok(true, Some("new title")));
+        assert!(ok(true, Some("new  title")));
+        // The ref names another window of the app: refused.
+        assert!(!ok(true, Some("other window")));
+        assert!(!ok(true, Some("old title")));
+        // No result window title (unavailable answer) or the ref unused.
+        assert!(!ok(true, None));
+        assert!(!ok(false, Some("new title")));
+        // The app id half is never relaxed.
+        assert!(!deferred_window_ref_holds(
+            Some("foot"),
+            Some("new title"),
+            Some("firefox"),
+            Some("old title"),
+            true,
+            Some("new title"),
+        ));
     }
 
     #[test]

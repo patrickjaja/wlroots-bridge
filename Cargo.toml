@@ -7,7 +7,7 @@ authors = ["Patrick Jaja"]
 description = "wlroots-Wayland support bridge for Linux computer-use tooling (Claude Desktop)."
 
 [dependencies]
-cu-atspi = { git = "https://github.com/patrickjaja/cu-atspi", rev = "36f727a105dd745f0f6458cb050aa0a3f870e61b", features = ["clap"] }
+cu-atspi = { git = "https://github.com/patrickjaja/cu-atspi", rev = "30ff9c84332569aadb4b83364cfdc89fa7ca6a04", features = ["clap"] }
 # Shared runner for the `abort-watch` subcommand, pinned by rev like cu-atspi.
 cu-abort-watch = { git = "https://github.com/patrickjaja/cu-abort-watch", rev = "c8be7212b6e40e582aebc6023d69d20bbedf79dc" }
 # Shared layer-shell renderer for the `overlay` subcommand (glow and drawn cursor).
